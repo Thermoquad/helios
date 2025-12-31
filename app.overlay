@@ -1,0 +1,9 @@
+/ {
+  aliases {
+    helios-glow0 = &glow0;
+    helios-pump0 = &pump0;
+    helios-tach0 = &motor0_rpm;
+    helios-motor0 = &motor0;
+    helios-enable-motor0 = &motor0_enable;
+  };
+};

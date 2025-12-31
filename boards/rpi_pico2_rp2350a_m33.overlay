@@ -1,0 +1,132 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Add reverse compatability with Pico */
+pico_spi: &spi0 {};
+pico_pwm: &pwm {};
+pico_adc: &adc {};
+pico_i2c0: &i2c0 {};
+pico_i2c1: &i2c1 {};
+
+&pinctrl {
+  pwm_ch6b_default: pwm_ch6b_default {
+    group1 {
+      pinmux = <PWM_6B_P13>;
+    };
+  };
+};
+
+&die_temp {
+	status = "okay";
+};
+
+&pico_adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+};
+
+&pico_pwm {
+  status = "okay";
+  pinctrl-0 = <&pwm_ch6b_default>;
+  divider-frac-6 = <15>;
+	divider-int-6 = <255>;
+};
+
+/ {
+  aliases {
+    helios-glow0 = &glow0;
+    helios-pump0 = &pump0;
+    helios-tach0 = &motor0_tach;
+    helios-motor0 = &motor0;
+    helios-enable-motor0 = &motor0_enable;
+    helios-temp0 = &core_temp;
+  };
+
+  glow_plugs {
+    compatible = "gpio-leds";
+    status = "okay";
+    glow0: glow0_pin {
+      gpios = <&pico_header 14 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+      label = "glow0";
+    };
+  };
+
+  thermistors {
+    core_temp: ntc0 {
+      status = "okay";
+      compatible = "ntc-thermistor-generic";
+      io-channels = <&pico_adc 0>;
+      pulldown-ohm = <10000>;
+      pullup-ohm = <0>;
+      connected-positive;
+      label = "core_temp";
+      zephyr,compensation-table = <(-5) 183150>,
+                <(0) 142470>,
+                <(5) 111645>,
+                <(15) 70020>,
+                <(25) 45000>,
+                <(35) 36405>,
+                <(45) 19922>,
+                <(55) 13662>,
+                <(65) 9549>,
+                <(75) 6795>,
+                <(85) 4910>,
+                <(95) 3603>,
+                <(105) 2682>,
+                <(115) 2022>,
+                <(125) 1539>,
+                <(135) 1192>,
+                <(145) 931>,
+                <(250) 500>;
+    };
+  };
+
+  motors {
+		compatible = "pwm-leds";
+    status = "okay";
+		motor0: motor0_ch {
+			pwms = <&pico_pwm 13 PWM_USEC(50) PWM_POLARITY_NORMAL>;
+			label = "motor0";
+		};
+  };
+
+  motor_enablers {
+    compatible = "gpio-leds";
+    status = "okay";
+    motor0_enable: motor0_enable_pin {
+      gpios = <&pico_header 11 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+      label = "motor0_enable";
+    };
+  };
+
+  pumps {
+    compatible = "gpio-leds";
+    status = "okay";
+    pump0: pump0_pin {
+      gpios = <&pico_header 15 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+      label = "motor0_enable";
+    };
+  };
+
+
+  tachs {
+    motor0_tach: motor0 {
+      compatible = "zephyr,tach-gpio";
+      status = "okay";
+      gpios = <&pico_header 12 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+      label = "motor0_rpm";
+      pulses-per-round = <1>;
+      /* starts motor faster, but limits RPM readings to 1000 and above */
+      timeout-ms = <150>;
+    };
+  };
+};

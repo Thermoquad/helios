@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+Diagnostics:
+  UnusedIncludes: Strict
+CompileFlags:
+  CompilationDatabase: build
+  Add: -Wno-unknown-warning-option
+  Remove:
+    - -mfp16-format=ieee
+    - -fno-reorder-functions
+    - -fno-printf-return-value
