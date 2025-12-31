@@ -117,10 +117,12 @@ static int read_temperature(struct temperature_state* state, unsigned current_mi
 
 static void announce_temperature(struct temperature_state* state, unsigned current_micros)
 {
+  // Rate limit announcements
   if (!state->samples_ready || current_micros < state->last_announce + ANNOUNCE_RATE_MS * 1e3) {
     return;
   }
 
+  // Publish temperature reading with PID control status
   struct temperature_data_msg msg = {
     .thermometer = state->index,
     .temperature = state->current_temperature,
@@ -137,8 +139,13 @@ static void announce_temperature(struct temperature_state* state, unsigned curre
       state->current_temperature);
 }
 
+/**
+ * Temperature-based PID control of motor RPM
+ * Uses inverted PID: higher temperature -> higher RPM to increase cooling
+ */
 static void pid_control(struct temperature_state* state, unsigned current_micros)
 {
+  // Validate PID control is enabled and configured
   if (!state->samples_ready || !state->pid_enabled || !state->motor_rpm_control_enabled) {
     return;
   }
@@ -148,13 +155,13 @@ static void pid_control(struct temperature_state* state, unsigned current_micros
     return;
   }
 
-  // Ensure motor RPM limits have been received before running PID
+  // Ensure motor RPM limits have been received from motor data before running PID
   if (state->motor_min_rpm == 0 || state->motor_max_rpm == 0) {
     LOG_WRN_RATELIMIT("PID enabled but motor RPM limits not yet received");
     return;
   }
 
-  // Set PID parameters
+  // Set PID parameters from current and target temperatures
   state->pid.input = state->current_temperature;
   state->pid.target = state->target_temperature;
 
@@ -242,6 +249,10 @@ int temperature_controller(void)
 // Zbus callbacks
 //////////////////////////////////////////////////////////////
 
+/**
+ * Motor data listener callback
+ * Receives motor RPM updates and dynamically adjusts PID output limits
+ */
 void motor_data_callback(const struct zbus_channel* chan)
 {
   const struct motor_data_msg* motor_data = zbus_chan_const_msg(chan);
@@ -249,9 +260,12 @@ void motor_data_callback(const struct zbus_channel* chan)
       motor_data->motor, motor_data->rpm);
 
   k_mutex_lock(&temperature_mutex, MUTEX_WAIT);
+
+  // Update any temperature controllers watching this motor
   for (int i = 0; i < ARRAY_SIZE(temperature_states); i++) {
     struct temperature_state* state = &temperature_states[i];
     if (state->watched_motor_index == motor_data->motor) {
+      // Update current RPM reading
       state->current_motor_rpm = motor_data->rpm;
 
       // Update motor min/max RPM limits from motor data
@@ -265,7 +279,7 @@ void motor_data_callback(const struct zbus_channel* chan)
         limits_changed = true;
       }
 
-      // Update PID output limits if they changed
+      // Update PID output limits to match motor capabilities
       if (limits_changed) {
         state->pid.output_min_limit = state->motor_min_rpm;
         state->pid.output_max_limit = state->motor_max_rpm;
@@ -301,6 +315,10 @@ bool temperature_command_validator(const void* msg, size_t msg_size)
   return true;
 }
 
+/**
+ * Temperature command listener callback
+ * Handles commands to configure motor RPM monitoring and PID control
+ */
 void temperature_command_callback(const struct zbus_channel* chan)
 {
   const struct temperature_command_msg* cmd = zbus_chan_const_msg(chan);
@@ -312,6 +330,7 @@ void temperature_command_callback(const struct zbus_channel* chan)
 
   switch (cmd->type) {
   case TEMP_CMD_WATCH_MOTOR:
+    // Associate this temperature controller with a motor to monitor
     state->watched_motor_index = cmd->motor_index;
     state->current_motor_rpm = 0;
     LOG_INF("Temp controller %d now watching motor %d",
@@ -319,6 +338,7 @@ void temperature_command_callback(const struct zbus_channel* chan)
     break;
 
   case TEMP_CMD_UNWATCH_MOTOR:
+    // Stop monitoring motor and disable RPM control
     LOG_INF("Temp controller %d stopped watching motor %d",
         cmd->thermometer, state->watched_motor_index);
     state->watched_motor_index = -1;
@@ -327,6 +347,7 @@ void temperature_command_callback(const struct zbus_channel* chan)
     break;
 
   case TEMP_CMD_ENABLE_RPM_CONTROL:
+    // Enable inverted PID control of motor RPM based on temperature
     if (state->watched_motor_index < 0) {
       LOG_WRN("Cannot enable RPM control: no motor being watched");
       break;
@@ -339,12 +360,14 @@ void temperature_command_callback(const struct zbus_channel* chan)
     break;
 
   case TEMP_CMD_DISABLE_RPM_CONTROL:
+    // Disable PID control of motor RPM
     state->motor_rpm_control_enabled = false;
     state->pid_enabled = false;
     LOG_INF("Temp controller %d disabled RPM control", cmd->thermometer);
     break;
 
   case TEMP_CMD_SET_TARGET_TEMP:
+    // Set target temperature for PID controller
     state->target_temperature = cmd->target_temperature;
     LOG_INF("Temp controller %d target temperature set to %.2f",
         cmd->thermometer, cmd->target_temperature);
