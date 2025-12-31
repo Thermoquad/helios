@@ -36,15 +36,15 @@ LOG_MODULE_REGISTER(helios_state);
 #define FLAME_OUT_TEMP PREHEAT_STAGE_2_TEMP
 
 // Temperature PID control configuration
-#define TEMP_CONTROLLER_INDEX 0  // Which thermometer to use
-#define TEMP_MOTOR_INDEX 0       // Which motor to control
-#define HEATING_TARGET_TEMP 230.0  // Target temperature during heating
+#define TEMP_CONTROLLER_INDEX 0 // Which thermometer to use
+#define TEMP_MOTOR_INDEX 0 // Which motor to control
+#define HEATING_TARGET_TEMP 230.0 // Target temperature during heating
 
 // Cooldown configuration
-#define COOLDOWN_THRESHOLD_TEMP 190.0  // Temperature that requires cooldown
-#define COOLDOWN_GLOW_START_TEMP 180.0  // Temperature to light glow plug
-#define COOLDOWN_COMPLETE_TEMP 120.0   // Temperature to end cooldown
-#define COOLDOWN_FAN_RPM 2500          // Fan speed during cooldown
+#define COOLDOWN_THRESHOLD_TEMP 190.0 // Temperature that requires cooldown
+#define COOLDOWN_GLOW_START_TEMP 180.0 // Temperature to light glow plug
+#define COOLDOWN_COMPLETE_TEMP 120.0 // Temperature to end cooldown
+#define COOLDOWN_FAN_RPM 2500 // Fan speed during cooldown
 
 //////////////////////////////////////////////////////////////
 // State names

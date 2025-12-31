@@ -214,8 +214,8 @@ static int initialize_temp_controllers()
     // Initialize motor RPM control fields
     controller.watched_motor_index = -1;
     controller.current_motor_rpm = 0;
-    controller.motor_min_rpm = 0;  // Will be set from motor data
-    controller.motor_max_rpm = 0;  // Will be set from motor data
+    controller.motor_min_rpm = 0; // Will be set from motor data
+    controller.motor_max_rpm = 0; // Will be set from motor data
     controller.motor_rpm_control_enabled = false;
     controller.target_temperature = 0.0;
 

@@ -126,34 +126,34 @@ struct motor_data_msg {
  * Temperature controller command types for motor RPM control
  */
 enum temperature_command_type {
-  TEMP_CMD_WATCH_MOTOR,          // Associate temp controller with a motor to monitor RPM
-  TEMP_CMD_UNWATCH_MOTOR,        // Stop watching motor RPM data
-  TEMP_CMD_ENABLE_RPM_CONTROL,   // Enable inverted PID control of motor RPM
-  TEMP_CMD_DISABLE_RPM_CONTROL,  // Disable PID control of motor RPM
-  TEMP_CMD_SET_TARGET_TEMP,      // Set target temperature for PID control
+  TEMP_CMD_WATCH_MOTOR, // Associate temp controller with a motor to monitor RPM
+  TEMP_CMD_UNWATCH_MOTOR, // Stop watching motor RPM data
+  TEMP_CMD_ENABLE_RPM_CONTROL, // Enable inverted PID control of motor RPM
+  TEMP_CMD_DISABLE_RPM_CONTROL, // Disable PID control of motor RPM
+  TEMP_CMD_SET_TARGET_TEMP, // Set target temperature for PID control
 };
 
 /**
  * Temperature controller command message
  */
 struct temperature_command_msg {
-  int thermometer;                    // Temperature controller index
+  int thermometer; // Temperature controller index
   enum temperature_command_type type; // Command type to execute
-  int motor_index;                    // Motor index (used with WATCH_MOTOR)
-  double target_temperature;          // Target temperature (used with SET_TARGET_TEMP)
+  int motor_index; // Motor index (used with WATCH_MOTOR)
+  double target_temperature; // Target temperature (used with SET_TARGET_TEMP)
 };
 
 /**
  * Temperature data message with PID control status
  */
 struct temperature_data_msg {
-  int thermometer;            // Temperature controller index
-  unsigned timestamp;         // Reading timestamp in microseconds
-  double temperature;         // Current temperature in Celsius
-  bool pid_enabled;           // PID controller active
-  bool rpm_control_enabled;   // Motor RPM control active
-  int watched_motor;          // Motor being monitored (-1 if none)
-  double target_temperature;  // Target temperature for PID control
+  int thermometer; // Temperature controller index
+  unsigned timestamp; // Reading timestamp in microseconds
+  double temperature; // Current temperature in Celsius
+  bool pid_enabled; // PID controller active
+  bool rpm_control_enabled; // Motor RPM control active
+  int watched_motor; // Motor being monitored (-1 if none)
+  double target_temperature; // Target temperature for PID control
 };
 
 #endif
