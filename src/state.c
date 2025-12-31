@@ -211,6 +211,10 @@ static bool preheat_failed()
   return true;
 }
 
+/**
+ * Enable temperature-based PID control of motor RPM
+ * Configures temperature controller to monitor motor and adjust RPM to maintain target temperature
+ */
 static int enable_temp_pid_control()
 {
   if (temp_pid_enabled) {
@@ -219,7 +223,7 @@ static int enable_temp_pid_control()
 
   int ret = 0;
 
-  // Step 1: Tell temperature controller to watch the motor
+  // Step 1: Associate temperature controller with motor to monitor RPM
   struct temperature_command_msg watch_cmd = {
     .thermometer = temp_controller_index,
     .type = TEMP_CMD_WATCH_MOTOR,
@@ -233,7 +237,7 @@ static int enable_temp_pid_control()
   }
   LOG_DBG("Temperature controller %d watching motor %d", temp_controller_index, TEMP_MOTOR_INDEX);
 
-  // Step 2: Set target temperature
+  // Step 2: Set target temperature for PID controller
   struct temperature_command_msg temp_cmd = {
     .thermometer = temp_controller_index,
     .type = TEMP_CMD_SET_TARGET_TEMP,
@@ -247,7 +251,7 @@ static int enable_temp_pid_control()
   }
   LOG_DBG("Temperature controller %d target set to %.2f", temp_controller_index, target_temperature);
 
-  // Step 3: Enable RPM control
+  // Step 3: Enable inverted PID control (higher temp -> higher RPM)
   struct temperature_command_msg enable_cmd = {
     .thermometer = temp_controller_index,
     .type = TEMP_CMD_ENABLE_RPM_CONTROL,
@@ -265,6 +269,10 @@ static int enable_temp_pid_control()
   return ret;
 }
 
+/**
+ * Disable temperature-based PID control of motor RPM
+ * Stops temperature controller from monitoring and controlling motor
+ */
 static int disable_temp_pid_control()
 {
   if (!temp_pid_enabled) {
@@ -273,7 +281,7 @@ static int disable_temp_pid_control()
 
   int ret = 0;
 
-  // Disable RPM control
+  // Disable PID control of motor RPM
   struct temperature_command_msg disable_cmd = {
     .thermometer = temp_controller_index,
     .type = TEMP_CMD_DISABLE_RPM_CONTROL,
@@ -286,7 +294,7 @@ static int disable_temp_pid_control()
     return ret;
   }
 
-  // Stop watching motor
+  // Stop monitoring motor RPM
   struct temperature_command_msg unwatch_cmd = {
     .thermometer = temp_controller_index,
     .type = TEMP_CMD_UNWATCH_MOTOR,
@@ -456,11 +464,15 @@ static enum smf_state_result heating_helios(void* o)
   return SMF_EVENT_HANDLED;
 }
 
+/**
+ * Cooldown state handler
+ * Manages safe shutdown with glow plug assistance to prevent carbon buildup
+ */
 static enum smf_state_result cooldown_helios(void* o)
 {
   current_state = HELIOS_COOLING;
 
-  // Check if cooldown is complete
+  // Check if cooldown is complete and transition to idle
   if (temperature <= COOLDOWN_COMPLETE_TEMP) {
     LOG_INF("Cooldown complete at %.2f°C, transitioning to idle", temperature);
     reached_high_temp = false;
@@ -468,16 +480,16 @@ static enum smf_state_result cooldown_helios(void* o)
     return SMF_EVENT_HANDLED;
   }
 
-  // Start glow plug when temperature drops to threshold
+  // Glow plug activation for carbon burnoff at lower temperatures
   if (temperature <= COOLDOWN_GLOW_START_TEMP) {
     if (!glowing) {
       LOG_INF("Starting glow plug for cooldown at %.2f°C", temperature);
       start_glow_burn();
     }
-    // Maintain fan speed during glow-assisted cooldown
+    // Maintain fan speed during glow-assisted cooldown to dissipate heat
     set_rpm(COOLDOWN_FAN_RPM);
   } else {
-    // Above glow start temp, just run fan
+    // Above glow start temp, just run fan for cooling
     set_rpm(COOLDOWN_FAN_RPM);
     if (glowing) {
       LOG_DBG("Extinguishing glow plug - temperature above cooldown glow threshold");
@@ -485,7 +497,7 @@ static enum smf_state_result cooldown_helios(void* o)
     }
   }
 
-  // Turn off pump during cooldown
+  // No fuel during cooldown - prevents new carbon deposits
   set_pump_rate(0);
 
   LOG_DBG_RATELIMIT("Cooldown in progress: %.2f°C (target: %.2f°C)",
@@ -635,7 +647,8 @@ static void state_command_callback(const struct zbus_channel* chan)
   }
 
   if (msg->mode == HELIOS_IDLE_MODE) {
-    // Check if cooldown is required before going to idle
+    // Check if cooldown is required before transitioning to idle
+    // Cooldown needed if burner reached operating temp (≥190°C) and is still hot
     if (reached_high_temp && temperature > COOLDOWN_COMPLETE_TEMP) {
       LOG_INF("Temperature is %.2f°C - initiating cooldown procedure", temperature);
       smf_set_state(SMF_CTX(&helios_state_ctx),
