@@ -40,6 +40,12 @@ LOG_MODULE_REGISTER(helios_state);
 #define TEMP_MOTOR_INDEX 0       // Which motor to control
 #define HEATING_TARGET_TEMP 230.0  // Target temperature during heating
 
+// Cooldown configuration
+#define COOLDOWN_THRESHOLD_TEMP 190.0  // Temperature that requires cooldown
+#define COOLDOWN_GLOW_START_TEMP 180.0  // Temperature to light glow plug
+#define COOLDOWN_COMPLETE_TEMP 120.0   // Temperature to end cooldown
+#define COOLDOWN_FAN_RPM 2500          // Fan speed during cooldown
+
 //////////////////////////////////////////////////////////////
 // State names
 //////////////////////////////////////////////////////////////
@@ -92,6 +98,9 @@ static int current_pump_rate;
 static bool temp_pid_enabled = false;
 static int temp_controller_index = TEMP_CONTROLLER_INDEX;
 static double target_temperature = HEATING_TARGET_TEMP;
+
+// Cooldown tracking
+static bool reached_high_temp = false;
 
 //////////////////////////////////////////////////////////////
 // State machine framework variables
@@ -411,6 +420,12 @@ static void end_preheat(void* o)
 static enum smf_state_result preheat_stage_2(void* o)
 {
   current_state = HELIOS_PREHEAT_STAGE_2;
+
+  // Track that we've reached high temperature
+  if (temperature >= COOLDOWN_THRESHOLD_TEMP) {
+    reached_high_temp = true;
+  }
+
   if (preheat_failed()) {
     LOG_DBG("stage 2 preheat failed");
     smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_ERROR]);
@@ -431,6 +446,12 @@ static enum smf_state_result preheat_stage_2(void* o)
 static enum smf_state_result heating_helios(void* o)
 {
   current_state = HELIOS_HEATING;
+
+  // Track that we've reached high temperature
+  if (temperature >= COOLDOWN_THRESHOLD_TEMP) {
+    reached_high_temp = true;
+  }
+
   set_pump_rate(user_pump_rate_target);
   return SMF_EVENT_HANDLED;
 }
@@ -438,6 +459,38 @@ static enum smf_state_result heating_helios(void* o)
 static enum smf_state_result cooldown_helios(void* o)
 {
   current_state = HELIOS_COOLING;
+
+  // Check if cooldown is complete
+  if (temperature <= COOLDOWN_COMPLETE_TEMP) {
+    LOG_INF("Cooldown complete at %.2f°C, transitioning to idle", temperature);
+    reached_high_temp = false;
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_IDLE]);
+    return SMF_EVENT_HANDLED;
+  }
+
+  // Start glow plug when temperature drops to threshold
+  if (temperature <= COOLDOWN_GLOW_START_TEMP) {
+    if (!glowing) {
+      LOG_INF("Starting glow plug for cooldown at %.2f°C", temperature);
+      start_glow_burn();
+    }
+    // Maintain fan speed during glow-assisted cooldown
+    set_rpm(COOLDOWN_FAN_RPM);
+  } else {
+    // Above glow start temp, just run fan
+    set_rpm(COOLDOWN_FAN_RPM);
+    if (glowing) {
+      LOG_DBG("Extinguishing glow plug - temperature above cooldown glow threshold");
+      stop_glow_burn();
+    }
+  }
+
+  // Turn off pump during cooldown
+  set_pump_rate(0);
+
+  LOG_DBG_RATELIMIT("Cooldown in progress: %.2f°C (target: %.2f°C)",
+      temperature, COOLDOWN_COMPLETE_TEMP);
+
   return SMF_EVENT_HANDLED;
 }
 
@@ -461,6 +514,23 @@ static void heating_exit(void* o)
   disable_temp_pid_control();
 }
 
+static void cooldown_entry(void* o)
+{
+  LOG_INF("Helios entering cooldown state - temperature: %.2f°C", temperature);
+  // Stop pump and disable temperature PID control
+  set_pump_rate(0);
+  disable_temp_pid_control();
+}
+
+static void cooldown_exit(void* o)
+{
+  LOG_INF("Helios exiting cooldown state");
+  // Ensure everything is stopped
+  stop_glow_burn();
+  set_rpm(0);
+  set_pump_rate(0);
+}
+
 //////////////////////////////////////////////////////////////
 // State machine definition
 //////////////////////////////////////////////////////////////
@@ -475,7 +545,8 @@ static const struct smf_state helios_state_machine[] = {
       NULL, NULL, NULL),
   [HELIOS_HEATING] = SMF_CREATE_STATE(heating_entry, heating_helios,
       heating_exit, NULL, NULL),
-  [HELIOS_COOLING] = SMF_CREATE_STATE(NULL, cooldown_helios, NULL, NULL, NULL),
+  [HELIOS_COOLING] = SMF_CREATE_STATE(cooldown_entry, cooldown_helios,
+      cooldown_exit, NULL, NULL),
   [HELIOS_ERROR] = SMF_CREATE_STATE(NULL, NULL, NULL, NULL, NULL),
 };
 
@@ -564,8 +635,15 @@ static void state_command_callback(const struct zbus_channel* chan)
   }
 
   if (msg->mode == HELIOS_IDLE_MODE) {
-    smf_set_state(SMF_CTX(&helios_state_ctx),
-        &helios_state_machine[HELIOS_IDLE]);
+    // Check if cooldown is required before going to idle
+    if (reached_high_temp && temperature > COOLDOWN_COMPLETE_TEMP) {
+      LOG_INF("Temperature is %.2f°C - initiating cooldown procedure", temperature);
+      smf_set_state(SMF_CTX(&helios_state_ctx),
+          &helios_state_machine[HELIOS_COOLING]);
+    } else {
+      smf_set_state(SMF_CTX(&helios_state_ctx),
+          &helios_state_machine[HELIOS_IDLE]);
+    }
   }
 
   if (msg->mode == HELIOS_HEAT_MODE) {
