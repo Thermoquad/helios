@@ -35,6 +35,11 @@ LOG_MODULE_REGISTER(helios_state);
 #define BURN_TEMP 220.0
 #define FLAME_OUT_TEMP PREHEAT_STAGE_2_TEMP
 
+// Temperature PID control configuration
+#define TEMP_CONTROLLER_INDEX 0  // Which thermometer to use
+#define TEMP_MOTOR_INDEX 0       // Which motor to control
+#define HEATING_TARGET_TEMP 230.0  // Target temperature during heating
+
 //////////////////////////////////////////////////////////////
 // State names
 //////////////////////////////////////////////////////////////
@@ -82,6 +87,11 @@ static unsigned preheat_started_at;
 
 static int user_pump_rate_target;
 static int current_pump_rate;
+
+// Temperature PID control tracking
+static bool temp_pid_enabled = false;
+static int temp_controller_index = TEMP_CONTROLLER_INDEX;
+static double target_temperature = HEATING_TARGET_TEMP;
 
 //////////////////////////////////////////////////////////////
 // State machine framework variables
@@ -190,6 +200,99 @@ static bool preheat_failed()
 
   LOG_ERR("preheat failed");
   return true;
+}
+
+static int enable_temp_pid_control()
+{
+  if (temp_pid_enabled) {
+    return 0;
+  }
+
+  int ret = 0;
+
+  // Step 1: Tell temperature controller to watch the motor
+  struct temperature_command_msg watch_cmd = {
+    .thermometer = temp_controller_index,
+    .type = TEMP_CMD_WATCH_MOTOR,
+    .motor_index = TEMP_MOTOR_INDEX,
+    .target_temperature = 0.0
+  };
+  ret = zbus_chan_pub(&temperature_command_chan, &watch_cmd, PUB_TIMEOUT);
+  if (ret) {
+    LOG_ERR("Failed to send watch motor command");
+    return ret;
+  }
+  LOG_DBG("Temperature controller %d watching motor %d", temp_controller_index, TEMP_MOTOR_INDEX);
+
+  // Step 2: Set target temperature
+  struct temperature_command_msg temp_cmd = {
+    .thermometer = temp_controller_index,
+    .type = TEMP_CMD_SET_TARGET_TEMP,
+    .motor_index = 0,
+    .target_temperature = target_temperature
+  };
+  ret = zbus_chan_pub(&temperature_command_chan, &temp_cmd, PUB_TIMEOUT);
+  if (ret) {
+    LOG_ERR("Failed to send set target temp command");
+    return ret;
+  }
+  LOG_DBG("Temperature controller %d target set to %.2f", temp_controller_index, target_temperature);
+
+  // Step 3: Enable RPM control
+  struct temperature_command_msg enable_cmd = {
+    .thermometer = temp_controller_index,
+    .type = TEMP_CMD_ENABLE_RPM_CONTROL,
+    .motor_index = 0,
+    .target_temperature = 0.0
+  };
+  ret = zbus_chan_pub(&temperature_command_chan, &enable_cmd, PUB_TIMEOUT);
+  if (ret) {
+    LOG_ERR("Failed to send enable RPM control command");
+    return ret;
+  }
+
+  temp_pid_enabled = true;
+  LOG_INF("Temperature PID control enabled on thermometer %d", temp_controller_index);
+  return ret;
+}
+
+static int disable_temp_pid_control()
+{
+  if (!temp_pid_enabled) {
+    return 0;
+  }
+
+  int ret = 0;
+
+  // Disable RPM control
+  struct temperature_command_msg disable_cmd = {
+    .thermometer = temp_controller_index,
+    .type = TEMP_CMD_DISABLE_RPM_CONTROL,
+    .motor_index = 0,
+    .target_temperature = 0.0
+  };
+  ret = zbus_chan_pub(&temperature_command_chan, &disable_cmd, PUB_TIMEOUT);
+  if (ret) {
+    LOG_ERR("Failed to send disable RPM control command");
+    return ret;
+  }
+
+  // Stop watching motor
+  struct temperature_command_msg unwatch_cmd = {
+    .thermometer = temp_controller_index,
+    .type = TEMP_CMD_UNWATCH_MOTOR,
+    .motor_index = 0,
+    .target_temperature = 0.0
+  };
+  ret = zbus_chan_pub(&temperature_command_chan, &unwatch_cmd, PUB_TIMEOUT);
+  if (ret) {
+    LOG_ERR("Failed to send unwatch motor command");
+    return ret;
+  }
+
+  temp_pid_enabled = false;
+  LOG_INF("Temperature PID control disabled on thermometer %d", temp_controller_index);
+  return ret;
 }
 
 //////////////////////////////////////////////////////////////
@@ -346,6 +449,18 @@ static void idle_entry(void* o)
   stop_glow_burn();
 }
 
+static void heating_entry(void* o)
+{
+  LOG_INF("Helios entering heating state - enabling temperature PID control");
+  enable_temp_pid_control();
+}
+
+static void heating_exit(void* o)
+{
+  LOG_INF("Helios exiting heating state - disabling temperature PID control");
+  disable_temp_pid_control();
+}
+
 //////////////////////////////////////////////////////////////
 // State machine definition
 //////////////////////////////////////////////////////////////
@@ -358,7 +473,8 @@ static const struct smf_state helios_state_machine[] = {
       end_preheat, NULL, NULL),
   [HELIOS_PREHEAT_STAGE_2] = SMF_CREATE_STATE(NULL, preheat_stage_2,
       NULL, NULL, NULL),
-  [HELIOS_HEATING] = SMF_CREATE_STATE(NULL, heating_helios, NULL, NULL, NULL),
+  [HELIOS_HEATING] = SMF_CREATE_STATE(heating_entry, heating_helios,
+      heating_exit, NULL, NULL),
   [HELIOS_COOLING] = SMF_CREATE_STATE(NULL, cooldown_helios, NULL, NULL, NULL),
   [HELIOS_ERROR] = SMF_CREATE_STATE(NULL, NULL, NULL, NULL, NULL),
 };

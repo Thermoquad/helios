@@ -15,6 +15,7 @@ ZBUS_CHAN_DECLARE(
     motor_data_chan,
     pump_command_chan,
     pump_data_chan,
+    temperature_command_chan,
     temperature_data_chan);
 
 ZBUS_OBS_DECLARE(state_data_listener);
@@ -121,10 +122,29 @@ struct motor_data_msg {
 // Temperature
 //////////////////////////////////////////////////////////////
 
+enum temperature_command_type {
+  TEMP_CMD_WATCH_MOTOR,
+  TEMP_CMD_UNWATCH_MOTOR,
+  TEMP_CMD_ENABLE_RPM_CONTROL,
+  TEMP_CMD_DISABLE_RPM_CONTROL,
+  TEMP_CMD_SET_TARGET_TEMP,
+};
+
+struct temperature_command_msg {
+  int thermometer;
+  enum temperature_command_type type;
+  int motor_index;
+  double target_temperature;
+};
+
 struct temperature_data_msg {
   int thermometer;
   unsigned timestamp;
   double temperature;
+  bool pid_enabled;
+  bool rpm_control_enabled;
+  int watched_motor;
+  double target_temperature;
 };
 
 #endif

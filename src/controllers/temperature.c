@@ -20,6 +20,11 @@ LOG_MODULE_REGISTER(temperature_controller);
 
 #define SAMPLE_COUNT 60
 
+// Default PID gains for temperature->RPM control
+#define DEFAULT_TEMP_KP 100.0
+#define DEFAULT_TEMP_KI 10.0
+#define DEFAULT_TEMP_KD 5.0
+
 //////////////////////////////////////////////////////////////
 // Hardware setup
 //////////////////////////////////////////////////////////////
@@ -47,6 +52,14 @@ struct temperature_state {
 
   bool pid_enabled;
   struct pid_controller pid;
+
+  // Motor RPM control fields
+  int watched_motor_index;
+  int current_motor_rpm;
+  int motor_min_rpm;
+  int motor_max_rpm;
+  bool motor_rpm_control_enabled;
+  double target_temperature;
 };
 
 //////////////////////////////////////////////////////////////
@@ -108,9 +121,15 @@ static void announce_temperature(struct temperature_state* state, unsigned curre
     return;
   }
 
-  struct temperature_data_msg msg = { .thermometer = state->index,
+  struct temperature_data_msg msg = {
+    .thermometer = state->index,
     .temperature = state->current_temperature,
-    .timestamp = current_micros };
+    .timestamp = current_micros,
+    .pid_enabled = state->pid_enabled,
+    .rpm_control_enabled = state->motor_rpm_control_enabled,
+    .watched_motor = state->watched_motor_index,
+    .target_temperature = state->target_temperature
+  };
 
   zbus_chan_pub(&temperature_data_chan, &msg, PUB_TIMEOUT);
   state->last_announce = current_micros;
@@ -120,8 +139,41 @@ static void announce_temperature(struct temperature_state* state, unsigned curre
 
 static void pid_control(struct temperature_state* state, unsigned current_micros)
 {
-  if (!state->samples_ready || !state->pid_enabled) {
+  if (!state->samples_ready || !state->pid_enabled || !state->motor_rpm_control_enabled) {
     return;
+  }
+
+  if (state->watched_motor_index < 0) {
+    LOG_WRN_RATELIMIT("PID enabled but no motor being watched");
+    return;
+  }
+
+  // Ensure motor RPM limits have been received before running PID
+  if (state->motor_min_rpm == 0 || state->motor_max_rpm == 0) {
+    LOG_WRN_RATELIMIT("PID enabled but motor RPM limits not yet received");
+    return;
+  }
+
+  // Set PID parameters
+  state->pid.input = state->current_temperature;
+  state->pid.target = state->target_temperature;
+
+  // Run PID cycle - output will be target RPM for motor
+  run_pid_cycle(&state->pid, current_micros);
+
+  // Publish motor command with calculated target RPM
+  int target_rpm = (int)state->pid.output;
+  struct motor_command_msg motor_cmd = {
+    .motor = state->watched_motor_index,
+    .rpm = target_rpm
+  };
+
+  int ret = zbus_chan_pub(&motor_command_chan, &motor_cmd, PUB_TIMEOUT);
+  if (ret) {
+    LOG_ERR_RATELIMIT("Failed to publish motor command for temp controller %d", state->index);
+  } else {
+    LOG_DBG_RATELIMIT("Temp controller %d: temp=%.2f target=%.2f -> motor RPM=%d",
+        state->index, state->current_temperature, state->target_temperature, target_rpm);
   }
 }
 
@@ -143,9 +195,22 @@ static int initialize_temp_controllers()
     struct pid_controller pid;
     pid.inverted = true;
     pid.time_divisor = 1.0e6;
+    pid.p_gain = DEFAULT_TEMP_KP;
+    pid.i_gain = DEFAULT_TEMP_KI;
+    pid.d_gain = DEFAULT_TEMP_KD;
+    pid.output_min_limit = 0.0;
+    pid.output_max_limit = 0.0;
     reset_pid(&pid);
     controller.pid_enabled = false;
     controller.pid = pid;
+
+    // Initialize motor RPM control fields
+    controller.watched_motor_index = -1;
+    controller.current_motor_rpm = 0;
+    controller.motor_min_rpm = 0;  // Will be set from motor data
+    controller.motor_max_rpm = 0;  // Will be set from motor data
+    controller.motor_rpm_control_enabled = false;
+    controller.target_temperature = 0.0;
 
     temperature_states[i] = controller;
   }
@@ -157,6 +222,7 @@ int temperature_controller(void)
   int ret = 0;
   k_mutex_init(&temperature_mutex);
   ret = initialize_temp_controllers();
+
   while (ret == 0) {
     k_mutex_lock(&temperature_mutex, MUTEX_WAIT);
     for (int i = 0; i < ARRAY_SIZE(temperature_states); i++) {
@@ -173,14 +239,147 @@ int temperature_controller(void)
 }
 
 //////////////////////////////////////////////////////////////
-// Zbus
+// Zbus callbacks
 //////////////////////////////////////////////////////////////
+
+void motor_data_callback(const struct zbus_channel* chan)
+{
+  const struct motor_data_msg* motor_data = zbus_chan_const_msg(chan);
+  LOG_DBG("Temperature controller received motor data for motor %d, RPM %d",
+      motor_data->motor, motor_data->rpm);
+
+  k_mutex_lock(&temperature_mutex, MUTEX_WAIT);
+  for (int i = 0; i < ARRAY_SIZE(temperature_states); i++) {
+    struct temperature_state* state = &temperature_states[i];
+    if (state->watched_motor_index == motor_data->motor) {
+      state->current_motor_rpm = motor_data->rpm;
+
+      // Update motor min/max RPM limits from motor data
+      bool limits_changed = false;
+      if (state->motor_min_rpm != motor_data->min_rpm) {
+        state->motor_min_rpm = motor_data->min_rpm;
+        limits_changed = true;
+      }
+      if (state->motor_max_rpm != motor_data->max_rpm) {
+        state->motor_max_rpm = motor_data->max_rpm;
+        limits_changed = true;
+      }
+
+      // Update PID output limits if they changed
+      if (limits_changed) {
+        state->pid.output_min_limit = state->motor_min_rpm;
+        state->pid.output_max_limit = state->motor_max_rpm;
+        LOG_DBG("Updated temp controller %d PID limits: %d - %d RPM",
+            i, state->motor_min_rpm, state->motor_max_rpm);
+      }
+
+      LOG_DBG("Updated temp controller %d with motor %d RPM: %d",
+          i, motor_data->motor, motor_data->rpm);
+    }
+  }
+  k_mutex_unlock(&temperature_mutex);
+}
+
+bool temperature_command_validator(const void* msg, size_t msg_size)
+{
+  const struct temperature_command_msg* cmd = msg;
+  if (cmd->thermometer < 0 || cmd->thermometer > ARRAY_SIZE(temperature_states) - 1) {
+    LOG_ERR("Invalid thermometer index: %d", cmd->thermometer);
+    return false;
+  }
+
+  // Validate motor index for WATCH_MOTOR command
+  if (cmd->type == TEMP_CMD_WATCH_MOTOR) {
+    // Note: We can't easily validate motor count here, but the command will be ignored
+    // if the motor doesn't exist
+    if (cmd->motor_index < 0) {
+      LOG_ERR("Invalid motor index: %d", cmd->motor_index);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void temperature_command_callback(const struct zbus_channel* chan)
+{
+  const struct temperature_command_msg* cmd = zbus_chan_const_msg(chan);
+  LOG_DBG("Got temperature command for thermometer %d, type %d",
+      cmd->thermometer, cmd->type);
+
+  k_mutex_lock(&temperature_mutex, MUTEX_WAIT);
+  struct temperature_state* state = &temperature_states[cmd->thermometer];
+
+  switch (cmd->type) {
+  case TEMP_CMD_WATCH_MOTOR:
+    state->watched_motor_index = cmd->motor_index;
+    state->current_motor_rpm = 0;
+    LOG_INF("Temp controller %d now watching motor %d",
+        cmd->thermometer, cmd->motor_index);
+    break;
+
+  case TEMP_CMD_UNWATCH_MOTOR:
+    LOG_INF("Temp controller %d stopped watching motor %d",
+        cmd->thermometer, state->watched_motor_index);
+    state->watched_motor_index = -1;
+    state->current_motor_rpm = 0;
+    state->motor_rpm_control_enabled = false;
+    break;
+
+  case TEMP_CMD_ENABLE_RPM_CONTROL:
+    if (state->watched_motor_index < 0) {
+      LOG_WRN("Cannot enable RPM control: no motor being watched");
+      break;
+    }
+    state->motor_rpm_control_enabled = true;
+    state->pid_enabled = true;
+    reset_pid(&state->pid);
+    LOG_INF("Temp controller %d enabled RPM control for motor %d",
+        cmd->thermometer, state->watched_motor_index);
+    break;
+
+  case TEMP_CMD_DISABLE_RPM_CONTROL:
+    state->motor_rpm_control_enabled = false;
+    state->pid_enabled = false;
+    LOG_INF("Temp controller %d disabled RPM control", cmd->thermometer);
+    break;
+
+  case TEMP_CMD_SET_TARGET_TEMP:
+    state->target_temperature = cmd->target_temperature;
+    LOG_INF("Temp controller %d target temperature set to %.2f",
+        cmd->thermometer, cmd->target_temperature);
+    break;
+
+  default:
+    LOG_ERR("Unknown temperature command type: %d", cmd->type);
+    break;
+  }
+
+  k_mutex_unlock(&temperature_mutex);
+}
+
+ZBUS_LISTENER_DEFINE(temperature_command_listener, temperature_command_callback);
+ZBUS_LISTENER_DEFINE(temperature_motor_data_listener, motor_data_callback);
+
+//////////////////////////////////////////////////////////////
+// Zbus channels
+//////////////////////////////////////////////////////////////
+
+ZBUS_CHAN_DEFINE(temperature_command_chan, /* Name */
+    struct temperature_command_msg, /* Message type */
+    temperature_command_validator, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS(temperature_command_listener), /* Observers */
+    ZBUS_MSG_INIT(.thermometer = 0, .type = TEMP_CMD_WATCH_MOTOR,
+        .motor_index = 0, .target_temperature = 0.0) /* Initial value */
+);
 
 ZBUS_CHAN_DEFINE(temperature_data_chan, /* Name */
     struct temperature_data_msg, /* Message type */
     NULL, /* Validator */
     NULL, /* User Data */
     ZBUS_OBSERVERS(state_data_listener), /* Observers */
-    ZBUS_MSG_INIT(.thermometer = 0, .timestamp = 0,
-        .temperature = 0.0) /* Initial value */
+    ZBUS_MSG_INIT(.thermometer = 0, .timestamp = 0, .temperature = 0.0,
+        .pid_enabled = false, .rpm_control_enabled = false,
+        .watched_motor = -1, .target_temperature = 0.0) /* Initial value */
 );

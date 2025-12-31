@@ -310,11 +310,13 @@ ZBUS_CHAN_DEFINE(motor_command_chan, /* Name */
     ZBUS_MSG_INIT(.motor = 0, .rpm = 0) /* Initial value */
 );
 
+ZBUS_OBS_DECLARE(temperature_motor_data_listener);
+
 ZBUS_CHAN_DEFINE(motor_data_chan, /* Name */
     struct motor_data_msg, /* Message type */
     NULL, /* Validator */
     NULL, /* User Data */
-    ZBUS_OBSERVERS(state_data_listener), /* Observers */
+    ZBUS_OBSERVERS(state_data_listener, temperature_motor_data_listener), /* Observers */
     ZBUS_MSG_INIT(.motor = 0, .rpm = 0, .target = 0,
         .timestamp = 0) /* Initial value */
 );
