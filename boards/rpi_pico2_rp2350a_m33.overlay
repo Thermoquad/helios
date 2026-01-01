@@ -8,11 +8,21 @@ pico_pwm: &pwm {};
 pico_adc: &adc {};
 pico_i2c0: &i2c0 {};
 pico_i2c1: &i2c1 {};
+pico_uart1: &uart1 {};
 
 &pinctrl {
   pwm_ch6b_default: pwm_ch6b_default {
     group1 {
       pinmux = <PWM_6B_P13>;
+    };
+  };
+
+  uart1_default: uart1_default {
+    group1 {
+      pinmux = <UART1_TX_P4>;
+    };
+    group2 {
+      pinmux = <UART1_RX_P5>;
     };
   };
 };
@@ -41,6 +51,13 @@ pico_i2c1: &i2c1 {};
 	divider-int-6 = <255>;
 };
 
+&pico_uart1 {
+  status = "okay";
+  current-speed = <115200>;
+  pinctrl-0 = <&uart1_default>;
+  pinctrl-names = "default";
+};
+
 / {
   aliases {
     helios-glow0 = &glow0;
@@ -49,6 +66,7 @@ pico_i2c1: &i2c1 {};
     helios-motor0 = &motor0;
     helios-enable-motor0 = &motor0_enable;
     helios-temp0 = &core_temp;
+    helios-uart = &pico_uart1;
   };
 
   glow_plugs {
