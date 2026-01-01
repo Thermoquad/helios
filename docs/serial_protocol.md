@@ -54,6 +54,9 @@ All packets follow this structure:
 - **Reflect In:** False
 - **Reflect Out:** False
 
+**Zephyr Implementation:** Use `crc16_ccitt()` from `<zephyr/sys/crc.h>`
+- See [Zephyr CRC API Documentation](https://docs.zephyrproject.org/latest/doxygen/html/group__crc.html)
+
 **CRC Coverage:** LENGTH + MSG_TYPE + PAYLOAD fields
 - CRC does NOT cover START or END delimiters
 - CRC transmitted MSB first (big-endian)
@@ -689,11 +692,15 @@ Little-endian:   00 00 00 00 00 28 6C 40
 
 Required Kconfig options:
 ```
-CONFIG_UART=y
-CONFIG_CRC=y
-CONFIG_CRC16=y
-CONFIG_SERIAL=y
+CONFIG_SERIAL=y    # UART/serial driver support
+CONFIG_CRC=y       # CRC library support
 ```
+
+**Note:** `CONFIG_CRC16` is not required - the CRC-16 functions are available when `CONFIG_CRC=y` is enabled.
+
+**Zephyr CRC Documentation:**
+- [CRC API Reference](https://docs.zephyrproject.org/latest/doxygen/html/group__crc.html)
+- [CRC Configuration Options](https://docs.zephyrproject.org/latest/kconfig.html#!CONFIG_CRC)
 
 ### Device Tree
 
@@ -781,3 +788,5 @@ UART node must be defined and aliased:
 - **IEEE 754:** IEEE Standard for Floating-Point Arithmetic
 - **LIN Specification:** LIN Consortium, LIN 2.0 Protocol Specification
 - **Zephyr RTOS:** https://docs.zephyrproject.org/
+- **Zephyr CRC API:** https://docs.zephyrproject.org/latest/doxygen/html/group__crc.html
+- **Zephyr Serial Driver:** https://docs.zephyrproject.org/latest/hardware/peripherals/uart.html
