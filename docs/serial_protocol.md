@@ -597,6 +597,45 @@ Host → Helios:  PING_REQUEST
 Helios → Host:  PING_RESPONSE (with uptime)
 ```
 
+### 5. Timeout Mode (Safety Feature)
+
+ICU automatically transitions to IDLE mode if communication with master is lost.
+
+**Operation:**
+- ICU tracks time since last PING_REQUEST received
+- If timeout interval exceeded, ICU automatically enters IDLE mode
+- Prevents continued operation without master supervision
+- **Enabled by default** for safety
+
+**Default Timeout:** 30 seconds (configurable)
+
+**Behavior:**
+```
+Normal operation:
+  Host → ICU:  PING_REQUEST (every 10-15 seconds)
+  ICU → Host:  PING_RESPONSE
+
+Timeout condition:
+  [30 seconds with no PING_REQUEST]
+  ICU: Automatically transitions to IDLE mode
+  ICU → Host: STATE_DATA (state = IDLE, error = timeout)
+```
+
+**Configuration:**
+- Timeout mode is **enabled by default**
+- Timeout interval is configurable (default: 30000ms)
+- Recommended ping interval: 10000-15000ms (well below timeout)
+- Can be disabled for testing/development (not recommended for production)
+
+**Safety Rationale:**
+- Ensures ICU doesn't operate indefinitely without master supervision
+- Critical for burner systems where loss of communication requires safe shutdown
+- IDLE mode performs proper cooldown if temperature is elevated
+- 30-second timeout allows for:
+  - Controller reconnection (unplugging/replugging for relocation)
+  - Temporary network disruptions
+  - Prevents unnecessary cooldown cycles during brief disconnections
+
 ---
 
 ## Example Packets
@@ -766,6 +805,10 @@ UART node must be defined and aliased:
 - **CRC-16:** Detects all single-bit and double-bit errors
 - **Byte Stuffing:** Prevents false START/END detection
 - **Framing:** Robust resynchronization on errors
+- **Timeout Mode:** Automatic IDLE transition on communication loss (enabled by default)
+  - Default timeout: 30 seconds
+  - Recommended master ping interval: 10-15 seconds
+  - Ensures safe shutdown if master connection is lost
 
 ---
 
