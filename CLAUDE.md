@@ -509,6 +509,20 @@ fake_temp <temp>       # Inject fake temperature reading
 
 ## Git Workflow
 
+**IMPORTANT: Always get approval before committing changes!**
+
+The developer manually tests firmware after flashing, so all changes must be reviewed before committing:
+
+1. Show changes with `git diff` or `git diff --staged`
+2. Explain what was modified and why
+3. Show the proposed commit message
+4. Wait for explicit approval
+5. Only then run `git commit`
+
+**Never commit without showing the changes first.**
+
+---
+
 **Commit Style:** Conventional Commits
 
 Format:
