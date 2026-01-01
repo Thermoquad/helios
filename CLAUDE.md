@@ -24,15 +24,25 @@
 
 ### Threading Model
 
-| Thread | File | Purpose | Rate |
-|--------|------|---------|------|
-| `helios_state_runner` | `src/state.c` | Main state machine | 5ms |
-| `temperature_controller` | `src/controllers/temperature.c` | Temperature sensing & PID | 10ms |
-| `motor_controller` | `src/controllers/motor.c` | Motor/fan PWM control | 25ms |
-| `pump_controller` | `src/controllers/pump.c` | Fuel pump solenoid control | Variable |
-| `glow_controller` | `src/controllers/glow.c` | Glow plug heating control | Variable |
-| `serial_rx` | `src/communications/serial_handler.c` | Serial RX & timeout checking | 1s |
-| `serial_tx` | `src/communications/serial_handler.c` | Telemetry broadcasting | 100ms |
+**All threads are defined in `src/main.c` using `K_THREAD_DEFINE`.**
+
+| Thread ID | Entry Point | Implementation File | Purpose | Rate | Priority |
+|-----------|-------------|-------------------|---------|------|----------|
+| `helios_state_id` | `helios_state_runner()` | `src/state.c` | Main state machine | 5ms | 3 |
+| `temperature_controller_id` | `temperature_controller()` | `src/controllers/temperature.c` | Temperature sensing & PID | 10ms | -1 |
+| `motor_controller_id` | `motor_controller()` | `src/controllers/motor.c` | Motor/fan PWM control | 25ms | -1 |
+| `pump_controller_id` | `pump_controller()` | `src/controllers/pump.c` | Fuel pump solenoid control | Variable | -1 |
+| `glow_controller_id` | `glow_controller()` | `src/controllers/glow.c` | Glow plug heating control | Variable | -1 |
+| `serial_rx_id` | `serial_rx_thread()` | `src/communications/serial_handler.c` | Serial RX & timeout checking | 1s | 5 |
+| `serial_tx_id` | `serial_tx_thread()` | `src/communications/serial_handler.c` | Telemetry broadcasting | 100ms | 6 |
+
+**Thread Entry Points:** All thread entry point functions are declared in `include/helios/threads.h`.
+
+**Priority Notes:**
+- Priority 3: State machine (higher priority for critical control)
+- Priority 5: Serial RX (responsive to incoming commands)
+- Priority 6: Serial TX (lower priority for telemetry)
+- Priority -1: Cooperative scheduling (controllers run when ready)
 
 ### Communication: Zbus Message Bus
 
@@ -359,7 +369,9 @@ fake_temp <temp>       # Inject fake temperature reading
 **Architecture:**
 - **Shared Library:** Reusable encoding/decoding functions for both ICU and controller
 - **ICU Handler:** UART integration, Zbus messaging, timeout mode
-- **Threads:** Separate RX and TX threads for concurrent communication
+- **Threads:** RX and TX threads defined in `main.c`, implemented in `serial_handler.c`
+  - `serial_rx_thread()`: Timeout checking (1s interval, priority 5)
+  - `serial_tx_thread()`: Telemetry broadcasting (100ms interval, priority 6)
 
 **Message Types:**
 - Commands (master → ICU): SET_MODE, SET_PUMP_RATE, SET_TARGET_RPM, PING_REQUEST, etc.

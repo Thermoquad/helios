@@ -34,21 +34,7 @@ static bool timeout_enabled = true; // Enabled by default
 static uint32_t timeout_interval_ms = 30000; // 30 seconds default
 static int64_t last_ping_time = 0;
 
-/* Thread Stacks and Structures */
-#define RX_THREAD_STACK_SIZE 2048
-#define TX_THREAD_STACK_SIZE 2048
-#define RX_THREAD_PRIORITY 5
-#define TX_THREAD_PRIORITY 6
-
-K_THREAD_STACK_DEFINE(rx_thread_stack, RX_THREAD_STACK_SIZE);
-K_THREAD_STACK_DEFINE(tx_thread_stack, TX_THREAD_STACK_SIZE);
-
-static struct k_thread rx_thread_data;
-static struct k_thread tx_thread_data;
-
 /* Forward Declarations */
-static void rx_thread(void* p1, void* p2, void* p3);
-static void tx_thread(void* p1, void* p2, void* p3);
 static void process_packet(const helios_packet_t* packet);
 static void send_packet(const helios_packet_t* packet);
 static void check_timeout(void);
@@ -99,48 +85,32 @@ int serial_handler_init(void)
   // Initialize timeout tracking
   last_ping_time = k_uptime_get();
 
-  // Start RX thread
-  k_thread_create(&rx_thread_data, rx_thread_stack,
-      K_THREAD_STACK_SIZEOF(rx_thread_stack), rx_thread,
-      NULL, NULL, NULL, RX_THREAD_PRIORITY, 0, K_NO_WAIT);
-  k_thread_name_set(&rx_thread_data, "serial_rx");
-
-  // Start TX thread
-  k_thread_create(&tx_thread_data, tx_thread_stack,
-      K_THREAD_STACK_SIZEOF(tx_thread_stack), tx_thread,
-      NULL, NULL, NULL, TX_THREAD_PRIORITY, 0, K_NO_WAIT);
-  k_thread_name_set(&tx_thread_data, "serial_tx");
-
   LOG_INF("Serial handler initialized on %s", uart_dev->name);
 
   return 0;
 }
 
 /* RX Thread - Handles timeout checking */
-static void rx_thread(void* p1, void* p2, void* p3)
+int serial_rx_thread(void)
 {
-  ARG_UNUSED(p1);
-  ARG_UNUSED(p2);
-  ARG_UNUSED(p3);
-
   while (1) {
     check_timeout();
     k_sleep(K_MSEC(1000)); // Check every second
   }
+
+  return 0;
 }
 
 /* TX Thread - Sends periodic telemetry */
-static void tx_thread(void* p1, void* p2, void* p3)
+int serial_tx_thread(void)
 {
-  ARG_UNUSED(p1);
-  ARG_UNUSED(p2);
-  ARG_UNUSED(p3);
-
   while (1) {
     // Send telemetry bundle every 100ms
     serial_send_telemetry_bundle();
     k_sleep(K_MSEC(100));
   }
+
+  return 0;
 }
 
 /* Check Timeout Mode */

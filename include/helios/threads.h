@@ -10,4 +10,7 @@ int pump_controller(void);
 int motor_controller(void);
 int temperature_controller(void);
 
+int serial_rx_thread(void);
+int serial_tx_thread(void);
+
 #endif
