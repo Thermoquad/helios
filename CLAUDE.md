@@ -31,6 +31,8 @@
 | `motor_controller` | `src/controllers/motor.c` | Motor/fan PWM control | 25ms |
 | `pump_controller` | `src/controllers/pump.c` | Fuel pump solenoid control | Variable |
 | `glow_controller` | `src/controllers/glow.c` | Glow plug heating control | Variable |
+| `serial_rx` | `src/communications/serial_handler.c` | Serial RX & timeout checking | 1s |
+| `serial_tx` | `src/communications/serial_handler.c` | Telemetry broadcasting | 100ms |
 
 ### Communication: Zbus Message Bus
 
@@ -282,14 +284,24 @@ helios/
 
 ### Build Commands (via Taskfile)
 
+**IMPORTANT:** Always use the Taskfile commands for building. Never run `west build` directly.
+
 ```bash
-task build-firmware    # Build firmware
+task build-firmware    # Build firmware (ALWAYS use this)
 task flash            # Flash to device
 task clean            # Clean build artifacts
 task menuconfig       # Zephyr Kconfig menu
 ```
 
-### Manual Build
+**Why use Taskfile:**
+- Ensures consistent build environment
+- Handles proper command sequencing
+- Includes formatting and validation steps
+- Used by CI/CD pipeline
+
+### Manual Build (Not Recommended)
+
+If you must build manually (not recommended):
 
 ```bash
 west build -b rpi_pico2
@@ -321,25 +333,45 @@ fake_temp <temp>       # Inject fake temperature reading
 
 ---
 
-## Serial Protocol (Future)
+## Serial Protocol
 
-**File:** `docs/serial_protocol.md`
+**Documentation:** `docs/serial_protocol.md`
 
-**Status:** Specification complete, implementation pending
+**Status:** ✅ Implemented
+
+**Files:**
+- `include/helios/communications/helios_serial.h` - Shared protocol library (header)
+- `src/communications/helios_serial.c` - Shared protocol library (implementation)
+- `include/helios/communications/serial_handler.h` - ICU-specific handler (header)
+- `src/communications/serial_handler.c` - ICU-specific handler (implementation)
 
 **Protocol:** Binary packet format with CRC-16-CCITT
-- UART at 115200 baud, 8N1
-- Byte stuffing for delimiter protection
-- Variable-length TELEMETRY_BUNDLE supporting 1-3 motors and 1-3 temps
-- 100ms telemetry broadcast rate
-- Will use UART → LIN translation IC
 
-**Implementation Requirements:**
-- Enable `CONFIG_UART=y` and `CONFIG_CRC16=y` in prj.conf
-- Add UART device tree node
-- Create serial interface thread
-- Implement packet framing and CRC validation
-- Bridge serial commands to zbus messages
+**Transport:** UART1 (GPIO 4: TX, GPIO 5: RX) at 115200 baud
+
+**Key Features:**
+- CRC-16-CCITT error detection
+- Byte stuffing for framing
+- Variable-length telemetry bundles (supports 1-3 motors, 1-3 temperature sensors)
+- Timeout mode (30s default) for safety - auto-transitions to IDLE on communication loss
+- Master/slave architecture (controller is master, ICU is slave)
+
+**Architecture:**
+- **Shared Library:** Reusable encoding/decoding functions for both ICU and controller
+- **ICU Handler:** UART integration, Zbus messaging, timeout mode
+- **Threads:** Separate RX and TX threads for concurrent communication
+
+**Message Types:**
+- Commands (master → ICU): SET_MODE, SET_PUMP_RATE, SET_TARGET_RPM, PING_REQUEST, etc.
+- Data (ICU → master): TELEMETRY_BUNDLE, PING_RESPONSE, individual sensor data
+- Errors (bidirectional): CRC errors, invalid commands, timeouts
+
+**Timing:**
+- 100ms telemetry broadcast rate (TX thread)
+- 1s timeout check interval (RX thread)
+- 10-15s recommended master ping interval
+
+**Future:** Will use UART → LIN translation IC for production
 
 ---
 
@@ -505,9 +537,9 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 1. ✅ Complete state machine implementation (DONE)
 2. ✅ Temperature PID control (DONE)
 3. ✅ Automatic cooldown with carbon prevention (DONE)
-4. 🔲 Serial protocol implementation (UART/LIN)
-5. 🔲 Multi-motor support (2-3 motors)
-6. 🔲 Multi-temperature sensor support
+4. ✅ Serial protocol implementation (DONE)
+5. 🔲 Multi-motor support (2-3 motors) - protocol ready, hardware pending
+6. 🔲 Multi-temperature sensor support - protocol ready, hardware pending
 7. 🔲 Firmware update over serial
 8. 🔲 Data logging and diagnostics
 9. 🔲 Configurable PID gains via commands
@@ -542,7 +574,9 @@ This project was developed with assistance from Claude (Anthropic). All signific
 - State machine with 9 states and automatic transitions
 - Temperature-based PID control with inverted logic
 - Automatic cooldown procedure with carbon prevention
-- Comprehensive serial protocol specification
+- Complete serial protocol implementation with UART integration
+- Timeout mode for safety (auto-idle on communication loss)
+- Modular communication library for shared use between ICU and controller
 - Safety features for emergency conditions
 
 **Last Updated:** 2025-12-31
