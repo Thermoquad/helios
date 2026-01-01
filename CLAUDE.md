@@ -1,5 +1,9 @@
 # Helios Project - AI Assistant Guide
 
+> **Note:** This file documents the Helios project specifically.
+> Always read the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md) first
+> for organization-wide structure and conventions.
+
 ## Project Overview
 
 **Helios** is a liquid fuel burner ignition control unit (ICU) firmware for diesel-like fuels including diesel, kerosene, used vegetable oil, and used motor oil. It runs on Zephyr RTOS and manages the complete combustion lifecycle from ignition to safe shutdown.
