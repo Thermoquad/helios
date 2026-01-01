@@ -17,6 +17,12 @@ The Helios serial protocol is a binary packet-based protocol for communicating w
 - Bidirectional communication
 - Periodic telemetry broadcast (100ms)
 
+**Network Architecture:**
+- **Master Device:** External controller/host
+- **Slave Device:** Helios ICU (Ignition Control Unit)
+- Master initiates commands, slave responds with telemetry and status
+- Slave autonomously broadcasts periodic telemetry (100ms)
+
 ---
 
 ## Packet Format
