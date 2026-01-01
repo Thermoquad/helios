@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #ifndef HELIOS_THREADS_H
 #define HELIOS_THREADS_H
 

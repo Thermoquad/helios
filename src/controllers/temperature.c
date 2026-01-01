@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #include <stdbool.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>

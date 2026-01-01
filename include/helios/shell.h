@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #ifndef HELIOS_SHELL_H
 #define HELIOS_SHELL_H
 #include <stdio.h>

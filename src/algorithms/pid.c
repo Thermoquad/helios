@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #include <helios/pid.h>
 
 void run_pid_cycle(struct pid_controller* pid, unsigned now)
