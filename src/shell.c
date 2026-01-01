@@ -8,6 +8,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 
+#include <helios/communications/serial_handler.h>
 #include <helios/zbus.h>
 
 //////////////////////////////////////////////////////////////
@@ -152,5 +153,50 @@ int cmd_set_glow_burn(const struct shell* sh, size_t argc, char** argv)
   const int burn_length = atoi(argv[2]);
   struct glow_command_msg msg = { .glow = glow_index, .duration = burn_length };
   zbus_chan_pub(&glow_command_chan, &msg, PUB_TIMEOUT);
+  return 0;
+}
+
+int cmd_serial_timeout(const struct shell* sh, size_t argc, char** argv)
+{
+  ARG_UNUSED(argc);
+  ARG_UNUSED(argv);
+
+  // Display current timeout configuration
+  bool enabled;
+  uint32_t timeout_ms;
+  serial_get_timeout_config(&enabled, &timeout_ms);
+
+  shell_print(sh, "Serial Timeout Configuration:");
+  shell_print(sh, "  Status: %s", enabled ? "ENABLED" : "DISABLED");
+  shell_print(sh, "  Interval: %u ms (%u seconds)", timeout_ms,
+      timeout_ms / 1000);
+
+  if (enabled) {
+    shell_print(sh, "");
+    shell_print(sh,
+        "Timeout will trigger IDLE transition if no PING received");
+    shell_print(sh, "Recommended master ping interval: 10-15 seconds");
+  }
+
+  return 0;
+}
+
+int cmd_serial_timeout_enable(const struct shell* sh, size_t argc, char** argv)
+{
+  ARG_UNUSED(argc);
+  ARG_UNUSED(argv);
+
+  serial_set_timeout_enabled(true);
+  shell_print(sh, "Serial timeout ENABLED");
+  return 0;
+}
+
+int cmd_serial_timeout_disable(const struct shell* sh, size_t argc, char** argv)
+{
+  ARG_UNUSED(argc);
+  ARG_UNUSED(argv);
+
+  serial_set_timeout_enabled(false);
+  shell_print(sh, "Serial timeout DISABLED");
   return 0;
 }

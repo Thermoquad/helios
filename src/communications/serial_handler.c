@@ -124,12 +124,18 @@ static void check_timeout(void)
   int64_t elapsed = now - last_ping_time;
 
   if (elapsed > timeout_interval_ms) {
-    LOG_WRN("Communication timeout - transitioning to IDLE");
+    // Check current state before transitioning
+    struct state_data_msg state_data;
+    if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) == 0) {
+      // Only transition if not already in IDLE
+      if (state_data.state != HELIOS_IDLE) {
+        LOG_WRN("Communication timeout - transitioning to IDLE");
 
-    // Send IDLE command to state machine
-    struct state_command_msg cmd = { .mode = HELIOS_IDLE_MODE,
-      .argument = 0 };
-    zbus_chan_pub(&state_command_chan, &cmd, K_NO_WAIT);
+        struct state_command_msg cmd = { .mode = HELIOS_IDLE_MODE,
+          .argument = 0 };
+        zbus_chan_pub(&state_command_chan, &cmd, K_NO_WAIT);
+      }
+    }
 
     // Reset timeout
     last_ping_time = now;
@@ -367,4 +373,12 @@ void serial_get_timeout_config(bool* enabled, uint32_t* timeout_ms)
   if (timeout_ms) {
     *timeout_ms = timeout_interval_ms;
   }
+}
+
+/* Set Timeout Enabled */
+void serial_set_timeout_enabled(bool enabled)
+{
+  timeout_enabled = enabled;
+  // Reset timeout timer when changing state
+  last_ping_time = k_uptime_get();
 }

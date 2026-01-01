@@ -18,6 +18,10 @@ int cmd_set_heat(const struct shell* sh, size_t argc, char** argv);
 
 int cmd_fake_temp(const struct shell* sh, size_t argc, char** argv);
 
+int cmd_serial_timeout(const struct shell* sh, size_t argc, char** argv);
+int cmd_serial_timeout_enable(const struct shell* sh, size_t argc, char** argv);
+int cmd_serial_timeout_disable(const struct shell* sh, size_t argc, char** argv);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
     sub_helios_state,
     SHELL_CMD(fan, NULL, "Set fan RPM", cmd_set_fan),
@@ -31,8 +35,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
+    sub_helios_serial_timeout,
+    SHELL_CMD(enable, NULL, "Enable serial timeout mode", cmd_serial_timeout_enable),
+    SHELL_CMD(disable, NULL, "Disable serial timeout mode", cmd_serial_timeout_disable),
+    SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+    sub_helios_serial,
+    SHELL_CMD(timeout, &sub_helios_serial_timeout, "Display or configure serial timeout", cmd_serial_timeout),
+    SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
     sub_helios,
     SHELL_CMD(fake, &sub_helios_fake, "Set motor RPM", NULL),
+    SHELL_CMD(serial, &sub_helios_serial, "Serial communication settings", NULL),
     SHELL_CMD(set_rpm, NULL, "Set motor RPM", cmd_set_rpm),
     SHELL_CMD(state, &sub_helios_state, "Set Helios' state", cmd_get_state),
     SHELL_CMD(set_pump_rate, NULL, "Set pump rate in milliseconds",
