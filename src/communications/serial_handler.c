@@ -45,6 +45,11 @@ static bool timeout_enabled = true; // Enabled by default
 static uint32_t timeout_interval_ms = 30000; // 30 seconds default
 static int64_t last_ping_time = 0;
 
+/* Telemetry Configuration */
+static bool telemetry_enabled = false; // Disabled by default (protocol v1.2)
+static uint32_t telemetry_interval_ms = 100; // Default 100ms
+static uint32_t telemetry_mode = 0; // 0 = bundled (default), 1 = individual
+
 /* Forward Declarations */
 static void process_packet(const helios_packet_t* packet);
 static void send_packet(const helios_packet_t* packet);
@@ -185,9 +190,9 @@ int serial_rx_thread(void)
 int serial_tx_thread(void)
 {
   while (1) {
-    // Send telemetry bundle every 100ms
+    // Send telemetry at configured interval (protocol v1.2)
     serial_send_telemetry_bundle();
-    k_sleep(K_MSEC(100));
+    k_sleep(K_MSEC(telemetry_interval_ms));
   }
 
   return 0;
@@ -204,6 +209,12 @@ static void check_timeout(void)
   int64_t elapsed = now - last_ping_time;
 
   if (elapsed > timeout_interval_ms) {
+    // Disable telemetry on timeout (protocol v1.2)
+    if (telemetry_enabled) {
+      LOG_WRN("Communication timeout - disabling telemetry");
+      telemetry_enabled = false;
+    }
+
     // Check current state before transitioning
     struct state_data_msg state_data;
     if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) == 0) {
@@ -335,6 +346,34 @@ static void process_packet(const helios_packet_t* packet)
     break;
   }
 
+  case HELIOS_MSG_TELEMETRY_CONFIG: {
+    if (packet->length != sizeof(helios_cmd_telemetry_config_t)) {
+      LOG_WRN("Invalid TELEMETRY_CONFIG length: got %d, expected %d",
+          packet->length, sizeof(helios_cmd_telemetry_config_t));
+      return;
+    }
+
+    helios_cmd_telemetry_config_t* cmd = (helios_cmd_telemetry_config_t*)packet->payload;
+
+    LOG_INF("TELEMETRY_CONFIG received: raw enabled=%u, interval=%u, mode=%u",
+        cmd->telemetry_enabled, cmd->interval_ms, cmd->telemetry_mode);
+
+    telemetry_enabled = (cmd->telemetry_enabled != 0);
+    telemetry_interval_ms = cmd->interval_ms;
+    telemetry_mode = cmd->telemetry_mode;
+
+    // Clamp interval to valid range (100-5000 ms)
+    if (telemetry_interval_ms < 100) {
+      telemetry_interval_ms = 100;
+    } else if (telemetry_interval_ms > 5000) {
+      telemetry_interval_ms = 5000;
+    }
+
+    LOG_INF("Telemetry config applied: enabled=%d, interval=%u ms, mode=%u",
+        telemetry_enabled, telemetry_interval_ms, telemetry_mode);
+    break;
+  }
+
   default:
     LOG_WRN("Unknown message type: 0x%02X", packet->msg_type);
     break;
@@ -377,6 +416,19 @@ static void send_packet(const helios_packet_t* packet)
 /* Send Telemetry Bundle */
 void serial_send_telemetry_bundle(void)
 {
+  // Check if telemetry is enabled (protocol v1.2)
+  if (!telemetry_enabled) {
+    static uint32_t last_log = 0;
+    uint32_t now = k_uptime_get_32();
+    if (now - last_log > 5000) {
+      LOG_DBG("Telemetry disabled, not sending bundle");
+      last_log = now;
+    }
+    return;
+  }
+
+  LOG_DBG("Sending telemetry bundle (enabled=%d)", telemetry_enabled);
+
   // Read current state from Zbus
   struct state_data_msg state_data;
   if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) != 0) {
