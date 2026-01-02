@@ -7,15 +7,15 @@
  * sends telemetry data, and implements timeout mode for safety.
  */
 
-#include <helios/communications/helios_serial.h>
 #include <helios/communications/serial_handler.h>
 #include <helios/zbus.h>
+#include <helios_serial/helios_serial.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(serial_handler, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(helios_serial_handler);
 
 /* UART Device */
 static const struct device* uart_dev;
@@ -26,8 +26,19 @@ static uint8_t decode_buffer[HELIOS_MAX_PACKET_SIZE];
 static size_t decode_buffer_index = 0;
 static bool decode_escape_next = false;
 
-/* TX Buffer */
+/* TX Buffer and State */
 static uint8_t tx_buffer[HELIOS_MAX_PACKET_SIZE * 2]; // 2x for stuffing overhead
+static size_t tx_index = 0;
+static size_t tx_length = 0;
+static bool tx_in_progress = false;
+K_MUTEX_DEFINE(tx_mutex); // Protects TX buffer and state
+
+/* RX Packet Queue - ISR pushes, thread pops */
+K_MSGQ_DEFINE(rx_packet_queue, sizeof(helios_packet_t), 8, 4);
+
+/* Work queue for deferred packet sending from ISR */
+static struct k_work ping_response_work;
+static void ping_response_work_handler(struct k_work* work);
 
 /* Timeout Mode Configuration */
 static bool timeout_enabled = true; // Enabled by default
@@ -38,28 +49,65 @@ static int64_t last_ping_time = 0;
 static void process_packet(const helios_packet_t* packet);
 static void send_packet(const helios_packet_t* packet);
 static void check_timeout(void);
+static void uart_isr(const struct device* dev, void* user_data);
 
-/* UART Callback */
-static void uart_rx_callback(const struct device* dev, void* user_data)
+/* Work handler for sending ping response from thread context */
+static void ping_response_work_handler(struct k_work* work)
+{
+  ARG_UNUSED(work);
+  serial_send_ping_response();
+}
+
+/* UART ISR - Handles both RX and TX interrupts */
+static void uart_isr(const struct device* dev, void* user_data)
 {
   ARG_UNUSED(user_data);
 
-  uint8_t byte;
-  while (uart_poll_in(dev, &byte) == 0) {
-    helios_packet_t packet;
-    helios_decode_result_t result = helios_decode_byte(
-        byte, &packet, &decoder_state, decode_buffer,
-        &decode_buffer_index, &decode_escape_next);
+  uart_irq_update(dev);
 
-    if (result == HELIOS_DECODE_OK) {
-      // Packet received successfully
-      process_packet(&packet);
-    } else if (result != HELIOS_DECODE_INCOMPLETE) {
-      // Decode error
-      LOG_WRN("Decode error: %d", result);
-      helios_reset_decoder(&decoder_state,
-          &decode_buffer_index,
-          &decode_escape_next);
+  // Handle RX
+  if (uart_irq_rx_ready(dev)) {
+    uint8_t byte;
+    while (uart_fifo_read(dev, &byte, 1) == 1) {
+      helios_packet_t packet;
+      helios_decode_result_t result = helios_decode_byte(
+          byte, &packet, &decoder_state, decode_buffer,
+          &decode_buffer_index, &decode_escape_next);
+
+      if (result == HELIOS_DECODE_OK) {
+        // Packet complete - queue for processing in thread context
+        int ret = k_msgq_put(&rx_packet_queue, &packet, K_NO_WAIT);
+        if (ret != 0) {
+          // Queue full - drop packet and log error
+          LOG_ERR("RX queue full, dropping packet type 0x%02X", packet.msg_type);
+        }
+      } else if (result != HELIOS_DECODE_INCOMPLETE) {
+        // Decode error - reset decoder and continue
+        LOG_WRN("Decode error: %d", result);
+        helios_reset_decoder(&decoder_state,
+            &decode_buffer_index,
+            &decode_escape_next);
+      }
+    }
+  }
+
+  // Handle TX
+  if (uart_irq_tx_ready(dev)) {
+    if (tx_in_progress && tx_index < tx_length) {
+      // Fill FIFO with as much data as possible
+      size_t remaining = tx_length - tx_index;
+      size_t sent = uart_fifo_fill(dev, &tx_buffer[tx_index], remaining);
+      tx_index += sent;
+
+      // Check if transmission complete
+      if (tx_index >= tx_length) {
+        tx_in_progress = false;
+        uart_irq_tx_disable(dev);
+        LOG_DBG("TX complete: %zu bytes sent", tx_length);
+      }
+    } else {
+      // No data to send, disable TX interrupt
+      uart_irq_tx_disable(dev);
     }
   }
 }
@@ -74,28 +122,60 @@ int serial_handler_init(void)
     return -1;
   }
 
-  // Configure UART for interrupt-driven reception
-  uart_irq_callback_set(uart_dev, uart_rx_callback);
-  uart_irq_rx_enable(uart_dev);
+  LOG_DBG("UART device ready: %s", uart_dev->name);
 
-  // Initialize decoder
+  // Initialize decoder BEFORE enabling interrupts
   helios_reset_decoder(&decoder_state, &decode_buffer_index,
       &decode_escape_next);
+  LOG_DBG("Decoder initialized");
+
+  // Flush RX FIFO to discard any garbage bytes
+  uint8_t discard;
+  int flushed = 0;
+  while (uart_fifo_read(uart_dev, &discard, 1) == 1) {
+    flushed++;
+  }
+  if (flushed > 0) {
+    LOG_DBG("Flushed %d bytes from RX FIFO", flushed);
+  }
+
+  // Initialize work queue for deferred sends from ISR
+  k_work_init(&ping_response_work, ping_response_work_handler);
+  LOG_DBG("Ping response work queue initialized");
 
   // Initialize timeout tracking
   last_ping_time = k_uptime_get();
 
-  LOG_INF("Serial handler initialized on %s", uart_dev->name);
+  // Register ISR for both RX and TX
+  uart_irq_callback_set(uart_dev, uart_isr);
+  LOG_DBG("UART ISR registered");
+
+  // Enable RX interrupt (after decoder initialized and FIFO flushed)
+  uart_irq_rx_enable(uart_dev);
+  LOG_DBG("UART RX interrupt enabled");
+
+  // TX interrupt will be enabled on-demand during transmission
+
+  LOG_INF("Serial handler initialized (interrupt-driven) on %s", uart_dev->name);
 
   return 0;
 }
 
-/* RX Thread - Handles timeout checking */
+/* RX Thread - Dequeues and processes received packets, checks timeout */
 int serial_rx_thread(void)
 {
   while (1) {
+    helios_packet_t packet;
+
+    // Wait for packet from queue (with timeout for periodic checks)
+    int ret = k_msgq_get(&rx_packet_queue, &packet, K_MSEC(1000));
+    if (ret == 0) {
+      // Process packet in thread context (safe for logging, zbus, etc.)
+      process_packet(&packet);
+    }
+
+    // Check timeout every iteration (at least once per second)
     check_timeout();
-    k_sleep(K_MSEC(1000)); // Check every second
   }
 
   return 0;
@@ -142,7 +222,7 @@ static void check_timeout(void)
   }
 }
 
-/* Process Received Packet */
+/* Process Received Packet (called from RX thread) */
 static void process_packet(const helios_packet_t* packet)
 {
   LOG_DBG("RX packet type 0x%02X, length %d", packet->msg_type,
@@ -220,9 +300,10 @@ static void process_packet(const helios_packet_t* packet)
   }
 
   case HELIOS_MSG_PING_REQUEST: {
-    LOG_DBG("PING_REQUEST received");
+    LOG_DBG("Ping request received");
     last_ping_time = k_uptime_get(); // Update timeout
-    serial_send_ping_response();
+    // Submit work to send response from thread context (not ISR)
+    k_work_submit(&ping_response_work);
     break;
   }
 
@@ -260,23 +341,37 @@ static void process_packet(const helios_packet_t* packet)
   }
 }
 
-/* Send Packet via UART */
+/* Send Packet via UART using interrupt-driven TX */
 static void send_packet(const helios_packet_t* packet)
 {
+  // Lock to prevent concurrent transmission attempts
+  k_mutex_lock(&tx_mutex, K_FOREVER);
+
+  // Wait for any previous transmission to complete
+  while (tx_in_progress) {
+    k_yield();
+  }
+
+  // Encode packet to buffer
   int encoded_len = helios_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
 
   if (encoded_len < 0) {
     LOG_ERR("Failed to encode packet: %d", encoded_len);
+    k_mutex_unlock(&tx_mutex);
     return;
   }
 
-  // Send via UART
-  for (int i = 0; i < encoded_len; i++) {
-    uart_poll_out(uart_dev, tx_buffer[i]);
-  }
+  // Prepare TX state
+  tx_index = 0;
+  tx_length = (size_t)encoded_len;
+  tx_in_progress = true;
 
-  LOG_DBG("TX packet type 0x%02X, encoded %d bytes", packet->msg_type,
-      encoded_len);
+  LOG_DBG("Starting TX: type=0x%02X, %zu bytes", packet->msg_type, tx_length);
+
+  // Enable TX interrupt - this will trigger ISR to start sending
+  uart_irq_tx_enable(uart_dev);
+
+  k_mutex_unlock(&tx_mutex);
 }
 
 /* Send Telemetry Bundle */
@@ -361,6 +456,7 @@ void serial_send_ping_response(void)
   uint64_t uptime = k_uptime_get();
 
   helios_create_ping_response(&packet, uptime);
+  LOG_DBG("Sending ping response (uptime=%llu ms)", uptime);
   send_packet(&packet);
 }
 

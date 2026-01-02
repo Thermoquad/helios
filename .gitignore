@@ -4,3 +4,4 @@
 /Taskfile.y*ml
 /.task/
 .cache/
+.claude/
