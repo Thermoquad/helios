@@ -4,6 +4,10 @@
 
 The Helios serial protocol is a binary packet-based protocol for communicating with Helios Ignition Control Units (ICUs) over UART. The protocol provides command/control capabilities and real-time telemetry from the burner system.
 
+### RFC 2119 Keywords
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119.txt).
+
 **Transport Layer:**
 - UART → LIN Translation IC
 - Default Baud Rate: 115200
@@ -66,8 +70,8 @@ All packets follow this structure:
 - See [Zephyr CRC API Documentation](https://docs.zephyrproject.org/latest/doxygen/html/group__crc.html)
 
 **CRC Coverage:** LENGTH + MSG_TYPE + PAYLOAD fields
-- CRC does NOT cover START or END delimiters
-- CRC transmitted MSB first (big-endian)
+- CRC MUST NOT include START or END delimiters
+- CRC MUST be transmitted MSB first (big-endian)
 
 **Example CRC Calculation (Python):**
 ```python
@@ -186,8 +190,8 @@ Control motor (fan) speed.
 - **rpm** (i32): Target RPM (0 = stop, 800-3400 = run)
 
 **Validation:**
-- RPM must be 0 OR within motor's min/max range
-- Invalid RPM returns ERROR_INVALID_CMD
+- RPM MUST be 0 OR within motor's min/max range
+- Invalid RPM MUST return ERROR_INVALID_CMD
 
 ### 0x12 - PUMP_COMMAND
 
@@ -207,7 +211,7 @@ Control fuel pump rate.
 - **rate_ms** (i32): Pulse interval in milliseconds (0 = stop, ≥100 = run)
 
 **Validation:**
-- rate_ms must be 0 OR ≥ 100 (pulse duration + recovery time)
+- rate_ms MUST be 0 OR ≥ 100 (pulse duration + recovery time)
 
 ### 0x13 - GLOW_COMMAND
 
@@ -227,8 +231,8 @@ Control glow plug heating.
 - **duration** (i32): Burn duration in milliseconds (0 = off, max = 300000)
 
 **Validation:**
-- duration must be 0-300000 ms (0-5 minutes)
-- Cannot re-light already lit glow plug
+- duration MUST be 0-300000 ms (0-5 minutes)
+- MUST NOT re-light already lit glow plug
 
 ### 0x14 - TEMP_COMMAND
 
@@ -274,9 +278,9 @@ Enable or disable periodic telemetry broadcasts, configure broadcast interval, a
   - 0 = Disable telemetry broadcasts (other parameters ignored)
   - 1 = Enable telemetry broadcasts at specified interval
 - **interval_ms** (u32): Telemetry broadcast interval in milliseconds
-  - Valid range: 100-5000 ms
-  - Recommended: 100 ms (default)
-  - Values outside range will be clamped to nearest valid value
+  - MUST be within range: 100-5000 ms
+  - RECOMMENDED: 100 ms (default)
+  - Values outside range SHALL be clamped to nearest valid value
 - **telemetry_mode** (u32): Telemetry message format
   - 0 = Bundled mode (default) - uses TELEMETRY_BUNDLE message
   - 1 = Individual mode - sends MOTOR_DATA, TEMP_DATA, STATE_DATA separately
@@ -334,7 +338,7 @@ Connectivity check / heartbeat.
 
 **Response:** PING_RESPONSE (0x2F) with uptime
 
-**Important:** PING_REQUEST also resets the telemetry timeout timer. If telemetry is enabled and no PING_REQUEST is received for 30 seconds, telemetry broadcasts are automatically disabled.
+**Important:** PING_REQUEST resets the telemetry timeout timer. If telemetry is enabled and no PING_REQUEST is received for 30 seconds, telemetry broadcasts SHALL be automatically disabled.
 
 ---
 
@@ -560,10 +564,10 @@ Size = 7 (header) + (motor_count × 12) + (temp_count × 8) + 11 (footer)
 
 **Notes:**
 - Arrays are variable-length based on motor_count and temp_count fields
-- Receivers must parse both count fields to determine array sizes
+- Receivers MUST parse both count fields to determine array sizes
 - Motor/temperature indices are implicit (array order: 0, 1, 2...)
-- For configurations exceeding size limit, use individual messages (MOTOR_DATA, TEMP_DATA) instead
-- Recommended: 2 motors + 2 temps or 1 motor + 3 temps for most applications
+- For configurations exceeding size limit, MUST use individual messages (MOTOR_DATA, TEMP_DATA) instead
+- RECOMMENDED: 2 motors + 2 temps or 1 motor + 3 temps for most applications
 
 ### 0x2F - PING_RESPONSE
 
@@ -670,11 +674,11 @@ Example at 500ms interval, individual mode (lower bandwidth):
 
 **Important:**
 - Telemetry is **disabled by default** on boot
-- Master must explicitly enable telemetry with TELEMETRY_CONFIG command
-- **No data messages (except PING_RESPONSE) are sent until telemetry is enabled**
-- Telemetry auto-disables after 30 seconds without PING_REQUEST
+- Master MUST explicitly enable telemetry with TELEMETRY_CONFIG command
+- **No data messages (except PING_RESPONSE) SHALL be sent until telemetry is enabled**
+- Telemetry SHALL auto-disable after 30 seconds without PING_REQUEST
 - This prevents boot synchronization issues and reduces unnecessary traffic
-- Choose bundled mode (default) for efficiency or individual mode for flexibility
+- SHOULD use bundled mode (default) for efficiency; MAY use individual mode for flexibility
 
 ### 3. Event-Driven Updates
 
@@ -685,7 +689,7 @@ PUMP_DATA:  Sent on pump cycle events
 GLOW_DATA:  Sent when glow plug turns on/off
 ```
 
-**Note:** Event-driven messages are only sent when telemetry is enabled (telemetry_enabled=1). They are independent of the telemetry_mode setting and are always sent when their events occur.
+**Note:** Event-driven messages SHALL only be sent when telemetry is enabled (telemetry_enabled=1). They are independent of the telemetry_mode setting and SHALL be sent when their events occur.
 
 ### 4. Heartbeat
 
@@ -726,10 +730,10 @@ Timeout condition:
 ```
 
 **Configuration:**
-- Timeout mode is **enabled by default**
+- Timeout mode MUST be **enabled by default**
 - Timeout interval is configurable (default: 30000ms)
-- Recommended ping interval: 10000-15000ms (well below timeout)
-- Can be disabled for testing/development (not recommended for production)
+- RECOMMENDED ping interval: 10000-15000ms (well below timeout)
+- MAY be disabled for testing/development (NOT RECOMMENDED for production)
 
 **Safety Rationale:**
 - Ensures ICU doesn't operate indefinitely without master supervision
@@ -743,7 +747,7 @@ Timeout condition:
   - Controller reconnection (unplugging/replugging for relocation)
   - Temporary network disruptions
   - Prevents unnecessary cooldown cycles during brief disconnections
-- Master must explicitly re-enable telemetry after reconnection to resume broadcasts
+- Master MUST explicitly re-enable telemetry after reconnection to resume broadcasts
 
 ---
 
@@ -810,7 +814,7 @@ Consolidated packet sent every 100ms with all critical telemetry.
 
 ## Data Type Encodings
 
-All multi-byte integers use **little-endian** byte order.
+All multi-byte integers MUST use **little-endian** byte order.
 
 | Type | Size | Format | Range |
 |------|------|--------|-------|
@@ -831,16 +835,16 @@ Little-endian:   00 00 00 00 00 28 6C 40
 
 ### UART Configuration
 
-- **Baud Rate:** 115200
-- **Data Bits:** 8
-- **Parity:** None
-- **Stop Bits:** 1
-- **Flow Control:** None
+- **Baud Rate:** MUST be 115200
+- **Data Bits:** MUST be 8
+- **Parity:** MUST be None
+- **Stop Bits:** MUST be 1
+- **Flow Control:** MUST be None
 
 ### Buffer Requirements
 
-**Receive Buffer:** Minimum 128 bytes (2x max packet size)
-**Transmit Buffer:** Minimum 128 bytes
+**Receive Buffer:** MUST be minimum 128 bytes (2x max packet size)
+**Transmit Buffer:** MUST be minimum 128 bytes
 
 ### Zephyr Configuration
 
@@ -858,7 +862,7 @@ CONFIG_CRC=y       # CRC library support
 
 ### Device Tree
 
-UART node must be defined and aliased:
+UART node MUST be defined and aliased:
 ```dts
 / {
     aliases {
@@ -942,6 +946,7 @@ UART node must be defined and aliased:
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 1.2 | 2026-01-02 | Helios Team | Updated specification to use RFC 2119 requirement language. All normative requirements now use keywords: MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RECOMMENDED, MAY, and OPTIONAL as defined in RFC 2119. |
 | 1.1 | 2026-01-02 | Helios Team | Added TELEMETRY_CONFIG command (0x16) for telemetry broadcast control with configurable interval (100-5000ms) and mode selection (bundled/individual). Telemetry now disabled by default on boot and auto-disables on 30s timeout. Added data message restriction: ICU SHALL NOT send data messages (except PING_RESPONSE) until telemetry is enabled. Prevents boot sync issues and allows bandwidth optimization. |
 | 1.0 | 2025-12-31 | Helios Team | Initial specification |
 
@@ -949,6 +954,7 @@ UART node must be defined and aliased:
 
 ## References
 
+- **RFC 2119:** Key words for use in RFCs to Indicate Requirement Levels - https://www.rfc-editor.org/rfc/rfc2119.txt
 - **CRC-16-CCITT:** ITU-T Recommendation V.41
 - **IEEE 754:** IEEE Standard for Floating-Point Arithmetic
 - **LIN Specification:** LIN Consortium, LIN 2.0 Protocol Specification
