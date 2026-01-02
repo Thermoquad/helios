@@ -15,13 +15,15 @@ The Helios serial protocol is a binary packet-based protocol for communicating w
 - CRC-16-CCITT for error detection
 - Fixed maximum packet size: 64 bytes
 - Bidirectional communication
-- Periodic telemetry broadcast (100ms)
+- Optional periodic telemetry broadcast (configurable 100-5000ms, disabled by default)
 
 **Network Architecture:**
 - **Master Device:** External controller/host
 - **Slave Device:** Helios ICU (Ignition Control Unit)
 - Master initiates commands, slave responds with telemetry and status
-- Slave autonomously broadcasts periodic telemetry (100ms)
+- Slave broadcasts periodic telemetry when enabled by master (configurable interval)
+- Telemetry broadcasting is disabled by default for boot synchronization
+- Default/recommended interval: 100ms (range: 100-5000ms)
 
 ---
 
@@ -108,18 +110,19 @@ To prevent confusion with START (0x7E) and END (0x7F) delimiters appearing in th
 | 0x12 | PUMP_COMMAND | Set pump rate | 8 bytes |
 | 0x13 | GLOW_COMMAND | Control glow plug | 8 bytes |
 | 0x14 | TEMP_COMMAND | Temperature controller config | 20 bytes |
+| 0x16 | TELEMETRY_CONFIG | Enable/disable telemetry broadcasts | 12 bytes |
 | 0x1F | PING_REQUEST | Heartbeat/connectivity check | 0 bytes |
 
 ### Data Messages (Helios → Host)
 
 | MSG_TYPE | Name | Description | Payload Size | Send Rate |
 |----------|------|-------------|--------------|-----------|
-| 0x20 | STATE_DATA | System state and status | 16 bytes | 250 ms |
-| 0x21 | MOTOR_DATA | Motor telemetry | 32 bytes | 100 ms |
+| 0x20 | STATE_DATA | System state and status | 16 bytes | 2.5× telemetry interval |
+| 0x21 | MOTOR_DATA | Motor telemetry | 32 bytes | Per telemetry interval |
 | 0x22 | PUMP_DATA | Pump status | 16 bytes | On event |
 | 0x23 | GLOW_DATA | Glow plug status | 12 bytes | On event |
-| 0x24 | TEMP_DATA | Temperature readings | 32 bytes | 100 ms |
-| 0x25 | TELEMETRY_BUNDLE | Consolidated telemetry | Variable: 37-61 bytes | 100 ms |
+| 0x24 | TEMP_DATA | Temperature readings | 32 bytes | Per telemetry interval |
+| 0x25 | TELEMETRY_BUNDLE | Consolidated telemetry | Variable: 37-61 bytes | Per telemetry interval |
 | 0x2F | PING_RESPONSE | Heartbeat response | 4 bytes | On request |
 
 ### Error Messages (Helios → Host)
@@ -253,6 +256,76 @@ Configure temperature controller.
 
 **Note:** f64 is IEEE 754 double-precision, little-endian byte order
 
+### 0x16 - TELEMETRY_CONFIG
+
+Enable or disable periodic telemetry broadcasts, configure broadcast interval, and select telemetry format.
+
+**Payload Structure (12 bytes):**
+```
++-------------------+-------------+-----------------+
+| telemetry_enabled | interval_ms | telemetry_mode  |
++-------------------+-------------+-----------------+
+| u32               | u32         | u32             |
++-------------------+-------------+-----------------+
+```
+
+**Fields:**
+- **telemetry_enabled** (u32): Telemetry broadcast control
+  - 0 = Disable telemetry broadcasts (other parameters ignored)
+  - 1 = Enable telemetry broadcasts at specified interval
+- **interval_ms** (u32): Telemetry broadcast interval in milliseconds
+  - Valid range: 100-5000 ms
+  - Recommended: 100 ms (default)
+  - Values outside range will be clamped to nearest valid value
+- **telemetry_mode** (u32): Telemetry message format
+  - 0 = Bundled mode (default) - uses TELEMETRY_BUNDLE message
+  - 1 = Individual mode - sends MOTOR_DATA, TEMP_DATA, STATE_DATA separately
+
+**Default State:** Telemetry broadcasts are **disabled** on boot
+
+**Data Message Restriction:**
+- **IMPORTANT:** The ICU SHALL NOT send any data messages (0x20-0x2F) until a TELEMETRY_CONFIG command with telemetry_enabled=1 has been received
+- The ONLY exception is PING_RESPONSE (0x2F), which may be sent at any time in response to PING_REQUEST
+- This prevents unsolicited data messages before the master is ready to receive them
+- Violating this restriction will cause decoder synchronization issues on the master
+
+**Auto-Disable Behavior:**
+- If telemetry is enabled but no PING_REQUEST is received for 30 seconds, telemetry broadcasts are automatically disabled
+- This prevents the ICU from continuously transmitting when the master is disconnected
+- Master must re-enable telemetry after reconnecting
+
+**Rationale:**
+- Disabling telemetry on boot prevents synchronization issues during initial connection
+- Master can establish communication, send initial commands, then enable telemetry when ready
+- Auto-disable on timeout prevents unnecessary transmissions when master is absent
+- Reduces power consumption and bus traffic when master is disconnected
+
+**Recovery Use Case:**
+- If the master's receive buffer becomes out of sync (repeated decode errors), it can send TELEMETRY_CONFIG (enable=0) to stop the flood of incoming telemetry data
+- This allows the master to clear its receive buffer, reset the decoder state, and resynchronize
+- Once synchronized, the master can re-enable telemetry with TELEMETRY_CONFIG (enable=1)
+- This is particularly useful during boot or after communication errors when packet boundaries are lost
+
+**Examples:**
+
+Enable telemetry at 100ms interval, bundled mode (recommended):
+```
+7E 0C 16 00 00 00 01 00 00 00 64 00 00 00 00 [CRC-H] [CRC-L] 7F
+         ^^enabled=1  ^^interval=100ms ^^mode=0 (bundled)
+```
+
+Enable telemetry at 250ms interval, individual messages mode:
+```
+7E 0C 16 00 00 00 01 00 00 00 FA 00 00 00 01 [CRC-H] [CRC-L] 7F
+         ^^enabled=1  ^^interval=250ms ^^mode=1 (individual)
+```
+
+Disable telemetry:
+```
+7E 0C 16 00 00 00 00 00 00 00 00 00 00 00 00 [CRC-H] [CRC-L] 7F
+         ^^enabled=0  ^^interval=0     ^^mode=0 (all ignored)
+```
+
 ### 0x1F - PING_REQUEST
 
 Connectivity check / heartbeat.
@@ -260,6 +333,8 @@ Connectivity check / heartbeat.
 **Payload:** None (0 bytes)
 
 **Response:** PING_RESPONSE (0x2F) with uptime
+
+**Important:** PING_REQUEST also resets the telemetry timeout timer. If telemetry is enabled and no PING_REQUEST is received for 30 seconds, telemetry broadcasts are automatically disabled.
 
 ---
 
@@ -294,7 +369,7 @@ System state and error status.
 - **timestamp** (u32): Timestamp in microseconds (wraps at 2^32)
 - **padding** (3 bytes): Reserved for alignment
 
-**Send Rate:** Every 250 ms
+**Send Rate:** 2.5× telemetry interval (250ms at default 100ms interval)
 
 ### 0x21 - MOTOR_DATA
 
@@ -319,7 +394,7 @@ Motor telemetry including RPM and PWM feedback.
 - **pwm** (i32): Current PWM pulse width in nanoseconds
 - **pwm_max** (i32): PWM period in nanoseconds
 
-**Send Rate:** Every 100 ms
+**Send Rate:** Per telemetry interval (100ms at default)
 
 ### 0x22 - PUMP_DATA
 
@@ -398,7 +473,7 @@ Temperature sensor readings and PID control status.
 - **target_temp** (f64): Target temperature for PID control
 - **padding** (2 bytes): Reserved for alignment
 
-**Send Rate:** Every 100 ms (after 60-sample warmup period)
+**Send Rate:** Per telemetry interval (100ms at default, after 60-sample warmup period)
 
 ### 0x25 - TELEMETRY_BUNDLE
 
@@ -481,7 +556,7 @@ Size = 7 (header) + (motor_count × 12) + (temp_count × 8) + 11 (footer)
 
 **Purpose:** Single packet containing all critical telemetry for efficient monitoring. Supports variable number of motors and temperature sensors for different burner configurations.
 
-**Send Rate:** Every 100 ms
+**Send Rate:** Per telemetry interval (100ms at default)
 
 **Notes:**
 - Arrays are variable-length based on motor_count and temp_count fields
@@ -569,24 +644,48 @@ Helios → Host:  (Success: no response)
 
 ### 2. Periodic Telemetry
 
-Helios broadcasts telemetry at fixed intervals:
+Helios broadcasts telemetry at fixed intervals **when enabled by master:**
 
 ```
-Every 100ms:  TELEMETRY_BUNDLE (consolidated data)
-              OR
-              MOTOR_DATA + TEMP_DATA (individual messages)
+Host → Helios:  TELEMETRY_CONFIG (enable=1, interval_ms=100, mode=0)
 
-Every 250ms:  STATE_DATA
+[After enabling, Helios broadcasts at configured interval:]
+
+Bundled Mode (mode=0, default):
+  Every <interval_ms>:      TELEMETRY_BUNDLE (consolidated data)
+  Every <interval_ms×2.5>:  STATE_DATA
+
+Individual Mode (mode=1):
+  Every <interval_ms>:      MOTOR_DATA + TEMP_DATA
+  Every <interval_ms×2.5>:  STATE_DATA
+
+Example at 100ms interval, bundled mode (recommended):
+  TELEMETRY_BUNDLE every 100ms
+  STATE_DATA every 250ms
+
+Example at 500ms interval, individual mode (lower bandwidth):
+  MOTOR_DATA + TEMP_DATA every 500ms
+  STATE_DATA every 1250ms
 ```
+
+**Important:**
+- Telemetry is **disabled by default** on boot
+- Master must explicitly enable telemetry with TELEMETRY_CONFIG command
+- **No data messages (except PING_RESPONSE) are sent until telemetry is enabled**
+- Telemetry auto-disables after 30 seconds without PING_REQUEST
+- This prevents boot synchronization issues and reduces unnecessary traffic
+- Choose bundled mode (default) for efficiency or individual mode for flexibility
 
 ### 3. Event-Driven Updates
 
-Helios sends data messages on state changes:
+Helios sends data messages on state changes **when telemetry is enabled:**
 
 ```
 PUMP_DATA:  Sent on pump cycle events
 GLOW_DATA:  Sent when glow plug turns on/off
 ```
+
+**Note:** Event-driven messages are only sent when telemetry is enabled (telemetry_enabled=1). They are independent of the telemetry_mode setting and are always sent when their events occur.
 
 ### 4. Heartbeat
 
@@ -599,11 +698,13 @@ Helios → Host:  PING_RESPONSE (with uptime)
 
 ### 5. Timeout Mode (Safety Feature)
 
-ICU automatically transitions to IDLE mode if communication with master is lost.
+ICU automatically transitions to IDLE mode and disables telemetry if communication with master is lost.
 
 **Operation:**
 - ICU tracks time since last PING_REQUEST received
-- If timeout interval exceeded, ICU automatically enters IDLE mode
+- If timeout interval exceeded (30 seconds):
+  - ICU automatically enters IDLE mode (state machine safety)
+  - Telemetry broadcasts are automatically disabled (communication safety)
 - Prevents continued operation without master supervision
 - **Enabled by default** for safety
 
@@ -614,11 +715,14 @@ ICU automatically transitions to IDLE mode if communication with master is lost.
 Normal operation:
   Host → ICU:  PING_REQUEST (every 10-15 seconds)
   ICU → Host:  PING_RESPONSE
+  ICU → Host:  [Telemetry broadcasts continue if enabled]
 
 Timeout condition:
   [30 seconds with no PING_REQUEST]
   ICU: Automatically transitions to IDLE mode
-  ICU → Host: STATE_DATA (state = IDLE, error = timeout)
+  ICU: Automatically disables telemetry broadcasts
+  ICU → Host: STATE_DATA (state = IDLE, error = timeout) [final message]
+  [No further telemetry until master re-enables]
 ```
 
 **Configuration:**
@@ -631,10 +735,15 @@ Timeout condition:
 - Ensures ICU doesn't operate indefinitely without master supervision
 - Critical for burner systems where loss of communication requires safe shutdown
 - IDLE mode performs proper cooldown if temperature is elevated
+- Telemetry auto-disable prevents:
+  - Continuous transmission when master is absent (reduces power, prevents bus congestion)
+  - Boot synchronization issues when master reconnects
+  - Unnecessary telemetry traffic during disconnected periods
 - 30-second timeout allows for:
   - Controller reconnection (unplugging/replugging for relocation)
   - Temporary network disruptions
   - Prevents unnecessary cooldown cycles during brief disconnections
+- Master must explicitly re-enable telemetry after reconnection to resume broadcasts
 
 ---
 
@@ -787,18 +896,24 @@ UART node must be defined and aliased:
 
 ### Throughput
 
-**100ms Telemetry Period:**
+**At Default 100ms Telemetry Period:**
 - TELEMETRY_BUNDLE: 58 bytes (after stuffing) = 580 bytes/sec
 - Individual messages (MOTOR + TEMP + STATE): ~90 bytes = 900 bytes/sec
 
+**At 500ms Telemetry Period (Lower Bandwidth):**
+- TELEMETRY_BUNDLE: 58 bytes = 116 bytes/sec
+- Individual messages: ~90 bytes = 180 bytes/sec
+
 **At 115200 baud:**
 - Effective throughput: ~11,520 bytes/sec
-- Telemetry overhead: ~5-8% bandwidth utilization
+- Telemetry overhead: ~1-8% bandwidth utilization (depending on interval)
 
 ### Latency
 
 - **Command Processing:** < 5ms (zbus publish + state machine cycle)
-- **Telemetry Delay:** 0-100ms (depends on timing within broadcast cycle)
+- **Telemetry Delay:** 0 to configured interval (depends on timing within broadcast cycle)
+  - At 100ms interval: 0-100ms latency
+  - At 500ms interval: 0-500ms latency
 
 ### Reliability
 
@@ -827,6 +942,7 @@ UART node must be defined and aliased:
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 1.1 | 2026-01-02 | Helios Team | Added TELEMETRY_CONFIG command (0x16) for telemetry broadcast control with configurable interval (100-5000ms) and mode selection (bundled/individual). Telemetry now disabled by default on boot and auto-disables on 30s timeout. Added data message restriction: ICU SHALL NOT send data messages (except PING_RESPONSE) until telemetry is enabled. Prevents boot sync issues and allows bandwidth optimization. |
 | 1.0 | 2025-12-31 | Helios Team | Initial specification |
 
 ---
