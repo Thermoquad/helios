@@ -876,6 +876,128 @@ UART node MUST be defined and aliased:
 };
 ```
 
+### Protocol Behavior
+
+These requirements apply to both master and slave implementations unless otherwise noted.
+
+#### Slave Transmission Requirements
+
+**Slaves MUST NOT transmit data messages (0x20-0x2F) unless:**
+- Responding to a PING_REQUEST with PING_RESPONSE, OR
+- Telemetry broadcasting has been enabled via TELEMETRY_CONFIG command
+
+**Rationale:** This prevents boot synchronization errors by ensuring the master is ready to receive data before the slave begins broadcasting.
+
+**Exception:** PING_RESPONSE (0x2F) MAY be transmitted at any time in response to PING_REQUEST.
+
+#### Byte Synchronization
+
+**All implementations MUST ignore bytes received on the serial line until a valid START byte (0x7E) is observed.**
+
+**Rationale:** This ensures proper frame synchronization and prevents misinterpretation of noise, garbage bytes, or mid-packet data as valid packets.
+
+**Behavior:**
+- Discard all bytes until START byte detected
+- After START byte, begin packet decoding
+- On decode error, reset to searching for START byte
+- Continue until valid packet received or error occurs
+
+**Error Recovery:**
+- **Packet exceeds maximum length (64 bytes):**
+  - Reset receive buffer immediately
+  - Discard all bytes until next START byte detected
+  - Log error if applicable
+- **END byte (0x7F) received before expected:**
+  - Packet incomplete or corrupted
+  - Reset receive buffer immediately
+  - Discard all bytes until next START byte detected
+  - Log error if applicable
+
+#### Emergency Stop Behavior (Masters Only)
+
+**When a master transmits EMERGENCY_STOP command to a slave, it MUST:**
+- Retransmit the EMERGENCY_STOP command every 250ms
+- Continue retransmitting until TELEMETRY_BUNDLE received with state = HELIOS_STATE_E_STOP
+- Once emergency stop confirmed, stop retransmitting command
+
+**Rationale:** This ensures emergency stop is reliably entered even if the initial command is lost or corrupted, providing safety-critical reliability for emergency stop activation.
+
+**Example - Master-Initiated Emergency Stop:**
+```
+Master sends: EMERGENCY_STOP command
+Master starts: Retransmitting EMERGENCY_STOP every 250ms
+Slave receives: EMERGENCY_STOP command
+Slave enters: HELIOS_STATE_E_STOP
+Slave begins: Broadcasting TELEMETRY_BUNDLE every 250ms
+Master receives: TELEMETRY_BUNDLE (state=E_STOP, ...)
+Master stops: Retransmitting EMERGENCY_STOP command
+Master continues: Receiving TELEMETRY_BUNDLE every 250ms
+... continues until power cycle ...
+```
+
+#### Emergency Stop Behavior (Slaves Only)
+
+**When a slave enters an emergency stop state, it MUST:**
+- Ignore ALL received commands, including PING_REQUEST
+- Transmit TELEMETRY_BUNDLE indicating emergency stop every 250ms
+- Continue emergency stop broadcasts until power cycle or hardware reset
+
+**Rationale:** Emergency stop is a safety-critical state that requires immediate visibility to the master and prevents any command processing that could interfere with safe shutdown.
+
+**Transmission During Emergency Stop:**
+- MUST transmit TELEMETRY_BUNDLE with state = HELIOS_STATE_E_STOP (0x08)
+- Includes all sensor data (motor, temperature, etc.) for diagnostics
+- Broadcast interval: 250ms (fixed, not configurable)
+- Broadcasts occur regardless of TELEMETRY_CONFIG state
+
+**Recovery:**
+- Emergency stop state can ONLY be cleared by:
+  - Power cycle (complete power loss and restoration)
+  - Hardware reset (physical reset button or watchdog)
+- Software commands MUST NOT clear emergency stop state
+
+**Example - Slave-Initiated Emergency Stop:**
+```
+Slave detects fault temperature (>275°C)
+Slave enters: HELIOS_STATE_E_STOP
+Slave begins: Broadcasting TELEMETRY_BUNDLE every 250ms
+Master sends: PING_REQUEST (ignored by slave)
+Master sends: SET_MODE(IDLE) (ignored by slave)
+Master receives: TELEMETRY_BUNDLE (state=E_STOP, error=OVERHEAT, temp=280°C, ...) every 250ms
+... continues until power cycle ...
+```
+
+#### Broadcast Retry Requirements (Masters Only)
+
+**If a master enables broadcast mode(s) on a slave via TELEMETRY_CONFIG, the master MUST retransmit the broadcast enable command every time a PING_RESPONSE is received from that slave if the master has NOT received a corresponding broadcast data message.**
+
+**Rationale:** This provides automatic recovery if:
+- The initial enable command is lost or corrupted
+- The slave resets and disables broadcasting
+- Communication is interrupted and broadcasting stops
+
+**Behavior:**
+- Track which broadcasts have been enabled
+- Track which broadcast data has been received
+- On each PING_RESPONSE:
+  - If broadcast enabled but no data received → retransmit enable command
+  - If broadcast data received → no action needed (working correctly)
+- Continue retrying until broadcast data is confirmed
+
+**Example:**
+```
+Master sends: TELEMETRY_CONFIG (enabled=true, interval=100ms)
+Master receives: PING_RESPONSE (uptime=5000ms)
+Master checks: Have we received TELEMETRY_BUNDLE? NO
+Master action: Retransmit TELEMETRY_CONFIG
+Master receives: PING_RESPONSE (uptime=15000ms)
+Master checks: Have we received TELEMETRY_BUNDLE? NO
+Master action: Retransmit TELEMETRY_CONFIG
+Master receives: TELEMETRY_BUNDLE (state=HEATING, ...)
+Master checks: Have we received TELEMETRY_BUNDLE? YES
+Master action: Stop retrying, broadcasts working
+```
+
 ---
 
 ## Error Handling
@@ -946,6 +1068,7 @@ UART node MUST be defined and aliased:
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 1.3 | 2026-01-02 | Helios Team | Added Protocol Behavior subsection to Implementation Requirements documenting: (1) Slave transmission restrictions - slaves MUST NOT transmit data messages unless responding to ping or broadcast enabled, (2) Byte synchronization with error recovery - implementations MUST ignore bytes until START byte observed, reset buffer on oversized packets or premature END byte, (3) Emergency stop behavior - slaves in emergency stop MUST ignore all commands and transmit TELEMETRY_BUNDLE every 250ms until power cycle, masters MUST retransmit EMERGENCY_STOP command every 250ms until confirmed, (4) Master broadcast retry requirements - masters MUST retransmit enable commands if corresponding broadcast data not received. These formalize best practices for robust communication, automatic error recovery, and safety-critical behavior. |
 | 1.2 | 2026-01-02 | Helios Team | Updated specification to use RFC 2119 requirement language. All normative requirements now use keywords: MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RECOMMENDED, MAY, and OPTIONAL as defined in RFC 2119. |
 | 1.1 | 2026-01-02 | Helios Team | Added TELEMETRY_CONFIG command (0x16) for telemetry broadcast control with configurable interval (100-5000ms) and mode selection (bundled/individual). Telemetry now disabled by default on boot and auto-disables on 30s timeout. Added data message restriction: ICU SHALL NOT send data messages (except PING_RESPONSE) until telemetry is enabled. Prevents boot sync issues and allows bandwidth optimization. |
 | 1.0 | 2025-12-31 | Helios Team | Initial specification |
