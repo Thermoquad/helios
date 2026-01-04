@@ -302,10 +302,12 @@ helios/
 
 ```bash
 task build-firmware    # Build firmware (ALWAYS use this)
-task flash            # Flash to device
-task clean            # Clean build artifacts
-task menuconfig       # Zephyr Kconfig menu
+task flash-firmware    # Flash to device (USER ONLY - see safety note below)
+task rebuild-firmware  # Clean and rebuild in one command
+task menuconfig        # Zephyr Kconfig menu
 ```
+
+**SAFETY REQUIREMENT:** AI assistants must NEVER automatically execute `task flash-firmware`. See [Thermoquad Organization CLAUDE.md](../../CLAUDE.md) "Firmware Flashing Safety" section. After building firmware, always ask the user to manually flash it.
 
 **Why use Taskfile:**
 - Ensures consistent build environment
@@ -609,7 +611,7 @@ This project was developed with assistance from Claude (Anthropic). All signific
 - Modular communication library for shared use between ICU and controller
 - Safety features for emergency conditions
 
-**Last Updated:** 2025-12-31
+**Last Updated:** 2026-01-04
 
 ---
 
