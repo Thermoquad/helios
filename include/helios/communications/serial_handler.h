@@ -11,15 +11,6 @@
 #include <stdint.h>
 
 /**
- * Initialize serial communication handler
- *
- * Sets up UART device, decoder state, and communication threads.
- *
- * @return 0 on success, negative error code on failure
- */
-int serial_handler_init(void);
-
-/**
  * Send a telemetry bundle packet
  *
  * Called by telemetry thread to broadcast system state.

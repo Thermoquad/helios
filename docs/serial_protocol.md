@@ -17,7 +17,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 **Protocol Characteristics:**
 - Binary packet format with framing
 - CRC-16-CCITT for error detection
-- Fixed maximum packet size: 64 bytes
+- Fixed maximum packet size: 128 bytes
 - Bidirectional communication
 - Optional periodic telemetry broadcast (configurable 100-5000ms, disabled by default)
 
@@ -49,13 +49,13 @@ All packets follow this structure:
 | Field | Size | Description |
 |-------|------|-------------|
 | **START** | 1 byte | Start delimiter: `0x7E` |
-| **LENGTH** | 1 byte | Payload length (0-58 bytes, excludes framing/CRC) |
+| **LENGTH** | 1 byte | Payload length (0-122 bytes, excludes framing/CRC) |
 | **MSG_TYPE** | 1 byte | Message type identifier (see Message Types) |
-| **PAYLOAD** | 0-58 bytes | Message-specific payload data |
+| **PAYLOAD** | 0-122 bytes | Message-specific payload data |
 | **CRC-16** | 2 bytes | CRC-16-CCITT (poly 0x1021, init 0xFFFF) over LENGTH + MSG_TYPE + PAYLOAD |
 | **END** | 1 byte | End delimiter: `0x7F` |
 
-**Total Packet Size:** 6 bytes (framing/CRC) + payload length = 6-64 bytes
+**Total Packet Size:** 6 bytes (framing/CRC) + payload length = 6-128 bytes
 
 ### CRC Calculation
 
@@ -483,7 +483,7 @@ Temperature sensor readings and PID control status.
 
 Consolidated telemetry packet for efficient polling with support for multiple motors and temperature sensors.
 
-**Payload Structure (Variable: 30-58 bytes):**
+**Payload Structure (Variable: 42-108 bytes):**
 ```
 +-------+-------+-------------+------------+
 | state | error | motor_count | temp_count |
@@ -491,13 +491,13 @@ Consolidated telemetry packet for efficient polling with support for multiple mo
 | u32   | u8    | u8          | u8         |
 +-------+-------+-------------+------------+
 
-+----------+--------+------+
-| For each motor (motor_count × 12 bytes):
-+----------+--------+------+
-| rpm      | target | pwm  |
-+----------+--------+------+
-| i32      | i32    | i32  |
-+----------+--------+------+
++----------+--------+------+------------+
+| For each motor (motor_count × 16 bytes):
++----------+--------+------+------------+
+| rpm      | target | pwm  | pwm_period |
++----------+--------+------+------------+
+| i32      | i32    | i32  | i32        |
++----------+--------+------+------------+
 
 +------+
 | For each temperature sensor (temp_count × 8 bytes):
@@ -528,7 +528,8 @@ Consolidated telemetry packet for efficient polling with support for multiple mo
 - **motors[motor_count]**: Array of motor telemetry entries
   - **rpm** (i32): Current motor RPM
   - **target** (i32): Target motor RPM
-  - **pwm** (i32): Motor PWM duty in nanoseconds
+  - **pwm** (i32): Motor PWM pulse width in nanoseconds
+  - **pwm_period** (i32): PWM period in nanoseconds (for percentage calculation: pwm/pwm_period × 100)
 - **temperatures[temp_count]**: Array of temperature readings
   - **temp** (f64): Temperature in Celsius
 - **pump_rate** (i32): Current pump rate in ms
@@ -540,23 +541,28 @@ Consolidated telemetry packet for efficient polling with support for multiple mo
 
 **Payload Size Calculation:**
 ```
-Size = 7 (header) + (motor_count × 12) + (temp_count × 8) + 11 (footer)
+Size = 7 (header) + (motor_count × 16) + (temp_count × 8) + 11 (footer)
 ```
 
 **Common Configurations:**
 
 | Motors | Temps | Payload Size | Status |
 |--------|-------|--------------|--------|
-| 1 | 1 | 7 + 12 + 8 + 11 = 38 bytes | ✓ Valid |
-| 2 | 1 | 7 + 24 + 8 + 11 = 50 bytes | ✓ Valid |
-| 1 | 2 | 7 + 12 + 16 + 11 = 46 bytes | ✓ Valid |
-| 2 | 2 | 7 + 24 + 16 + 11 = 58 bytes | ✓ Valid (at limit) |
-| 3 | 1 | 7 + 36 + 8 + 11 = 62 bytes | ✗ Exceeds limit |
-| 1 | 3 | 7 + 12 + 24 + 11 = 54 bytes | ✓ Valid |
-| 3 | 2 | 7 + 36 + 16 + 11 = 70 bytes | ✗ Exceeds limit |
-| 3 | 3 | 7 + 36 + 24 + 11 = 78 bytes | ✗ Exceeds limit |
+| 1 | 1 | 7 + 16 + 8 + 11 = 42 bytes | ✓ Valid |
+| 2 | 1 | 7 + 32 + 8 + 11 = 58 bytes | ✓ Valid |
+| 3 | 1 | 7 + 48 + 8 + 11 = 74 bytes | ✓ Valid |
+| 1 | 2 | 7 + 16 + 16 + 11 = 50 bytes | ✓ Valid |
+| 2 | 2 | 7 + 32 + 16 + 11 = 66 bytes | ✓ Valid |
+| 3 | 2 | 7 + 48 + 16 + 11 = 82 bytes | ✓ Valid |
+| 1 | 3 | 7 + 16 + 24 + 11 = 58 bytes | ✓ Valid |
+| 2 | 3 | 7 + 32 + 24 + 11 = 74 bytes | ✓ Valid |
+| 3 | 3 | 7 + 48 + 24 + 11 = 90 bytes | ✓ Valid |
+| 4 | 3 | 7 + 64 + 24 + 11 = 106 bytes | ✓ Valid |
+| 3 | 4 | 7 + 48 + 32 + 11 = 98 bytes | ✓ Valid |
+| 5 | 3 | 7 + 80 + 24 + 11 = 122 bytes | ✓ Valid (at limit) |
+| 3 | 7 | 7 + 48 + 56 + 11 = 122 bytes | ✓ Valid (at limit) |
 
-**Maximum Payload Constraint:** 58 bytes (to fit within 64-byte packet with framing)
+**Maximum Payload Constraint:** 122 bytes (to fit within 128-byte packet with framing)
 
 **Purpose:** Single packet containing all critical telemetry for efficient monitoring. Supports variable number of motors and temperature sensors for different burner configurations.
 
@@ -567,7 +573,8 @@ Size = 7 (header) + (motor_count × 12) + (temp_count × 8) + 11 (footer)
 - Receivers MUST parse both count fields to determine array sizes
 - Motor/temperature indices are implicit (array order: 0, 1, 2...)
 - For configurations exceeding size limit, MUST use individual messages (MOTOR_DATA, TEMP_DATA) instead
-- RECOMMENDED: 2 motors + 2 temps or 1 motor + 3 temps for most applications
+- RECOMMENDED: 2 motors + 2 temps or 3 motors + 3 temps for most applications
+- Packet size increased from 64 to 128 bytes to accommodate pwm_period field and support all practical motor/temp configurations
 
 ### 0x2F - PING_RESPONSE
 
@@ -843,8 +850,8 @@ Little-endian:   00 00 00 00 00 28 6C 40
 
 ### Buffer Requirements
 
-**Receive Buffer:** MUST be minimum 128 bytes (2x max packet size)
-**Transmit Buffer:** MUST be minimum 128 bytes
+**Receive Buffer:** MUST be minimum 256 bytes (2x max packet size for byte stuffing)
+**Transmit Buffer:** MUST be minimum 256 bytes (2x max packet size for byte stuffing)
 
 ### Zephyr Configuration
 
@@ -1023,16 +1030,18 @@ Master action: Stop retrying, broadcasts working
 ### Throughput
 
 **At Default 100ms Telemetry Period:**
-- TELEMETRY_BUNDLE: 58 bytes (after stuffing) = 580 bytes/sec
+- TELEMETRY_BUNDLE (3 motors + 3 temps): ~90 bytes raw, ~120 bytes after stuffing = 1200 bytes/sec
+- TELEMETRY_BUNDLE (2 motors + 2 temps): ~66 bytes raw, ~90 bytes after stuffing = 900 bytes/sec
 - Individual messages (MOTOR + TEMP + STATE): ~90 bytes = 900 bytes/sec
 
 **At 500ms Telemetry Period (Lower Bandwidth):**
-- TELEMETRY_BUNDLE: 58 bytes = 116 bytes/sec
+- TELEMETRY_BUNDLE (3 motors + 3 temps): ~120 bytes after stuffing = 240 bytes/sec
+- TELEMETRY_BUNDLE (2 motors + 2 temps): ~90 bytes after stuffing = 180 bytes/sec
 - Individual messages: ~90 bytes = 180 bytes/sec
 
 **At 115200 baud:**
 - Effective throughput: ~11,520 bytes/sec
-- Telemetry overhead: ~1-8% bandwidth utilization (depending on interval)
+- Telemetry overhead: ~2-10% bandwidth utilization (depending on interval and configuration)
 
 ### Latency
 
@@ -1068,6 +1077,7 @@ Master action: Stop retrying, broadcasts working
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 1.4 | 2026-01-03 | Helios Team | Added pwm_period field to TELEMETRY_BUNDLE motor entries (0x25). Each motor entry now includes: rpm, target, pwm (pulse width), and pwm_period (period). This enables PWM duty cycle percentage calculation (pwm/pwm_period × 100) from telemetry data without requiring individual MOTOR_DATA messages. Motor entry size increased from 12 to 16 bytes. Increased maximum packet size from 64 to 128 bytes (payload from 58 to 122 bytes) to accommodate larger telemetry bundles. All practical motor/temp configurations now supported: up to 3 motors + 3 temps (90 bytes), 5 motors + 3 temps (122 bytes at limit), or 3 motors + 7 temps (122 bytes at limit). Buffer requirements increased from 128 to 256 bytes. |
 | 1.3 | 2026-01-02 | Helios Team | Added Protocol Behavior subsection to Implementation Requirements documenting: (1) Slave transmission restrictions - slaves MUST NOT transmit data messages unless responding to ping or broadcast enabled, (2) Byte synchronization with error recovery - implementations MUST ignore bytes until START byte observed, reset buffer on oversized packets or premature END byte, (3) Emergency stop behavior - slaves in emergency stop MUST ignore all commands and transmit TELEMETRY_BUNDLE every 250ms until power cycle, masters MUST retransmit EMERGENCY_STOP command every 250ms until confirmed, (4) Master broadcast retry requirements - masters MUST retransmit enable commands if corresponding broadcast data not received. These formalize best practices for robust communication, automatic error recovery, and safety-critical behavior. |
 | 1.2 | 2026-01-02 | Helios Team | Updated specification to use RFC 2119 requirement language. All normative requirements now use keywords: MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RECOMMENDED, MAY, and OPTIONAL as defined in RFC 2119. |
 | 1.1 | 2026-01-02 | Helios Team | Added TELEMETRY_CONFIG command (0x16) for telemetry broadcast control with configurable interval (100-5000ms) and mode selection (bundled/individual). Telemetry now disabled by default on boot and auto-disables on 30s timeout. Added data message restriction: ICU SHALL NOT send data messages (except PING_RESPONSE) until telemetry is enabled. Prevents boot sync issues and allows bandwidth optimization. |
