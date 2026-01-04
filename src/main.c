@@ -26,11 +26,7 @@ K_THREAD_DEFINE(temperature_controller_id, CONFIG_MAIN_STACK_SIZE,
 K_THREAD_DEFINE(helios_state_id, CONFIG_MAIN_STACK_SIZE, helios_state_runner,
     NULL, NULL, NULL, 3, 0, 0);
 
-K_THREAD_DEFINE(serial_rx_id, CONFIG_MAIN_STACK_SIZE, serial_rx_thread, NULL, NULL, NULL, 5, 0,
-    0);
-
-K_THREAD_DEFINE(serial_tx_id, CONFIG_MAIN_STACK_SIZE, serial_tx_thread, NULL, NULL, NULL, 6, 0,
-    0);
+K_THREAD_DEFINE(serial_id, CONFIG_MAIN_STACK_SIZE, serial_thread, NULL, NULL, NULL, 5, 0, 0);
 
 int main(void)
 {
