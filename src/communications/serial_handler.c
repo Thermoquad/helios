@@ -207,10 +207,10 @@ static void check_timeout(void)
     struct state_data_msg state_data;
     if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) == 0) {
       // Only transition if not already in IDLE
-      if (state_data.state != HELIOS_IDLE) {
+      if (state_data.state != HELIOS_STATE_IDLE) {
         LOG_WRN("Communication timeout - transitioning to IDLE");
 
-        struct state_command_msg cmd = { .mode = HELIOS_IDLE_MODE,
+        struct state_command_msg cmd = { .mode = HELIOS_MODE_IDLE,
           .argument = 0 };
         zbus_chan_pub(&state_command_chan, &cmd, K_NO_WAIT);
       }
@@ -239,19 +239,19 @@ static void recieve_packet(const helios_packet_t* packet)
     struct state_command_msg state_cmd;
     switch (cmd->mode) {
     case HELIOS_MODE_IDLE:
-      state_cmd.mode = HELIOS_IDLE_MODE;
+      state_cmd.mode = HELIOS_MODE_IDLE;
       state_cmd.argument = 0;
       break;
     case HELIOS_MODE_FAN:
-      state_cmd.mode = HELIOS_FAN_MODE;
+      state_cmd.mode = HELIOS_MODE_FAN;
       state_cmd.argument = (int)cmd->parameter; // RPM
       break;
     case HELIOS_MODE_HEAT:
-      state_cmd.mode = HELIOS_HEAT_MODE;
+      state_cmd.mode = HELIOS_MODE_HEAT;
       state_cmd.argument = 0;
       break;
     case HELIOS_MODE_EMERGENCY:
-      state_cmd.mode = HELIOS_EMERGENCY;
+      state_cmd.mode = HELIOS_MODE_EMERGENCY;
       state_cmd.argument = 0;
       break;
     default:
@@ -328,7 +328,7 @@ static void recieve_packet(const helios_packet_t* packet)
   case HELIOS_MSG_EMERGENCY_STOP: {
     LOG_WRN("EMERGENCY_STOP received");
 
-    struct state_command_msg state_cmd = { .mode = HELIOS_EMERGENCY,
+    struct state_command_msg state_cmd = { .mode = HELIOS_MODE_EMERGENCY,
       .argument = 0 };
     zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
     break;
@@ -444,31 +444,31 @@ void serial_send_telemetry_bundle(void)
   // Map state machine state to serial protocol state
   helios_state_t serial_state;
   switch (state_data.state) {
-  case HELIOS_INITIALIZING:
+  case HELIOS_STATE_INITIALIZING:
     serial_state = HELIOS_STATE_INITIALIZING;
     break;
-  case HELIOS_IDLE:
+  case HELIOS_STATE_IDLE:
     serial_state = HELIOS_STATE_IDLE;
     break;
-  case HELIOS_BLOWING:
+  case HELIOS_STATE_BLOWING:
     serial_state = HELIOS_STATE_BLOWING;
     break;
-  case HELIOS_PREHEAT:
+  case HELIOS_STATE_PREHEAT:
     serial_state = HELIOS_STATE_PREHEAT;
     break;
-  case HELIOS_PREHEAT_STAGE_2:
+  case HELIOS_STATE_PREHEAT_STAGE_2:
     serial_state = HELIOS_STATE_PREHEAT_STAGE_2;
     break;
-  case HELIOS_HEATING:
+  case HELIOS_STATE_HEATING:
     serial_state = HELIOS_STATE_HEATING;
     break;
-  case HELIOS_COOLING:
+  case HELIOS_STATE_COOLING:
     serial_state = HELIOS_STATE_COOLING;
     break;
-  case HELIOS_ERROR:
+  case HELIOS_STATE_ERROR:
     serial_state = HELIOS_STATE_ERROR;
     break;
-  case HELIOS_E_STOP:
+  case HELIOS_STATE_E_STOP:
     serial_state = HELIOS_STATE_E_STOP;
     break;
   default:

@@ -95,14 +95,14 @@ int cmd_get_state(const struct shell* sh, size_t argc, char** argv)
 int cmd_set_idle(const struct shell* sh, size_t argc, char** argv)
 {
   struct state_command_msg cmd;
-  cmd.mode = HELIOS_IDLE_MODE;
+  cmd.mode = HELIOS_MODE_IDLE;
   return send_state_command(sh, &cmd);
 }
 
 int cmd_set_fan(const struct shell* sh, size_t argc, char** argv)
 {
   struct state_command_msg cmd;
-  cmd.mode = HELIOS_FAN_MODE;
+  cmd.mode = HELIOS_MODE_FAN;
   const int arg = atoi(argv[1]);
   cmd.argument = arg;
   return send_state_command(sh, &cmd);
@@ -111,7 +111,7 @@ int cmd_set_fan(const struct shell* sh, size_t argc, char** argv)
 int cmd_set_heat(const struct shell* sh, size_t argc, char** argv)
 {
   struct state_command_msg cmd;
-  cmd.mode = HELIOS_HEAT_MODE;
+  cmd.mode = HELIOS_MODE_HEAT;
   const int arg = atoi(argv[1]);
   cmd.argument = arg;
   return send_state_command(sh, &cmd);

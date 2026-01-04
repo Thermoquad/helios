@@ -49,34 +49,11 @@ LOG_MODULE_REGISTER(helios_state);
 #define COOLDOWN_FAN_RPM 2500 // Fan speed during cooldown
 
 //////////////////////////////////////////////////////////////
-// State names
-//////////////////////////////////////////////////////////////
-
-const char helios_state_names[9][18] = {
-  [HELIOS_INITIALIZING] = "initializing",
-  [HELIOS_IDLE] = "idle",
-  [HELIOS_BLOWING] = "fan mode",
-  [HELIOS_PREHEAT] = "preheat stage 1",
-  [HELIOS_PREHEAT_STAGE_2] = "preheat stage 2",
-  [HELIOS_HEATING] = "heat mode",
-  [HELIOS_COOLING] = "cooling",
-  [HELIOS_ERROR] = "error",
-  [HELIOS_E_STOP] = "emergency stop",
-};
-
-const char helios_mode_names[4][12] = {
-  [HELIOS_IDLE_MODE] = "idle",
-  [HELIOS_FAN_MODE] = "fan",
-  [HELIOS_HEAT_MODE] = "heat",
-  [HELIOS_EMERGENCY] = "emergency",
-};
-
-//////////////////////////////////////////////////////////////
 // State variables
 //////////////////////////////////////////////////////////////
 
 K_MUTEX_DEFINE(state_machine_mutex);
-static enum helios_states current_state;
+static helios_state_t current_state;
 
 static int current_rpm;
 static int max_rpm;
@@ -103,7 +80,7 @@ static double target_temperature = HEATING_TARGET_TEMP;
 
 // Cooldown tracking
 static bool reached_high_temp = false;
-static enum helios_states cooldown_return_state = HELIOS_IDLE;
+static helios_state_t cooldown_return_state = HELIOS_STATE_IDLE;
 
 //////////////////////////////////////////////////////////////
 // State machine framework variables
@@ -119,7 +96,7 @@ static struct s_object {
 // Helper functions
 //////////////////////////////////////////////////////////////
 
-static void zbus_publish_state(enum helios_states state, int code, bool error)
+static void zbus_publish_state(helios_state_t state, int code, bool error)
 {
   const struct state_data_msg msg = {
     .timestamp = k_cyc_to_us_floor64(k_cycle_get_64()),
@@ -197,7 +174,7 @@ static bool check_fault_temperature()
   if (temperature >= FAULT_TEMP) {
     LOG_ERR("FAULT TEMPERATURE REACHED: %.2f°C >= %.2f°C - triggering E_STOP",
         temperature, FAULT_TEMP);
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_E_STOP]);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_E_STOP]);
     return true;
   }
   return false;
@@ -335,7 +312,7 @@ int helios_state_runner(void)
   int res = 0;
   k_mutex_init(&state_machine_mutex);
   smf_set_initial(SMF_CTX(&helios_state_ctx),
-      &helios_state_machine[HELIOS_INITIALIZING]);
+      &helios_state_machine[HELIOS_STATE_INITIALIZING]);
 
   while (res == 0) {
     k_mutex_lock(&state_machine_mutex, MUTEX_WAIT);
@@ -369,20 +346,20 @@ static enum smf_state_result initialize_helios(void* o)
 
   if (temperature >= FAULT_TEMP) {
     LOG_ERR("FATAL: helios temperature in fault mode during initialization");
-    zbus_publish_state(HELIOS_INITIALIZING, 1, true);
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_E_STOP]);
+    zbus_publish_state(HELIOS_STATE_INITIALIZING, 1, true);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_E_STOP]);
     return res;
   }
 
-  zbus_publish_state(HELIOS_INITIALIZING, 1, false);
-  smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_IDLE]);
+  zbus_publish_state(HELIOS_STATE_INITIALIZING, 1, false);
+  smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_IDLE]);
   LOG_DBG("Helios initialized");
   return res;
 }
 
 static enum smf_state_result idle(void* o)
 {
-  current_state = HELIOS_IDLE;
+  current_state = HELIOS_STATE_IDLE;
   if (check_fault_temperature()) {
     return SMF_EVENT_HANDLED;
   }
@@ -391,7 +368,7 @@ static enum smf_state_result idle(void* o)
 
 static enum smf_state_result blowing(void* o)
 {
-  current_state = HELIOS_BLOWING;
+  current_state = HELIOS_STATE_BLOWING;
   if (check_fault_temperature()) {
     return SMF_EVENT_HANDLED;
   }
@@ -402,7 +379,7 @@ static void stop_blowing_helios(void* o) { set_rpm(0); }
 
 static enum smf_state_result preheat_helios(void* o)
 {
-  current_state = HELIOS_PREHEAT;
+  current_state = HELIOS_STATE_PREHEAT;
   const unsigned current_micros = k_cyc_to_us_floor64(k_cycle_get_64());
 
   if (check_fault_temperature()) {
@@ -410,7 +387,7 @@ static enum smf_state_result preheat_helios(void* o)
   }
 
   if (preheat_failed()) {
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_ERROR]);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_ERROR]);
     return SMF_EVENT_HANDLED;
   }
 
@@ -430,7 +407,7 @@ static enum smf_state_result preheat_helios(void* o)
 
   if (temperature >= PREHEAT_STAGE_2_TEMP) {
     LOG_DBG("preheat stage 1 complete");
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_PREHEAT_STAGE_2]);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_PREHEAT_STAGE_2]);
   }
 
   return SMF_EVENT_HANDLED;
@@ -452,7 +429,7 @@ static void end_preheat(void* o)
 
 static enum smf_state_result preheat_stage_2(void* o)
 {
-  current_state = HELIOS_PREHEAT_STAGE_2;
+  current_state = HELIOS_STATE_PREHEAT_STAGE_2;
 
   if (check_fault_temperature()) {
     return SMF_EVENT_HANDLED;
@@ -465,13 +442,13 @@ static enum smf_state_result preheat_stage_2(void* o)
 
   if (preheat_failed()) {
     LOG_DBG("stage 2 preheat failed");
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_ERROR]);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_ERROR]);
     return SMF_EVENT_HANDLED;
   }
 
   if (glowing && temperature >= PREHEAT_SUCCESS_TEMP) {
     LOG_DBG("stage 2 preheat complete");
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_HEATING]);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_HEATING]);
     stop_glow_burn();
   }
 
@@ -482,7 +459,7 @@ static enum smf_state_result preheat_stage_2(void* o)
 
 static enum smf_state_result heating_helios(void* o)
 {
-  current_state = HELIOS_HEATING;
+  current_state = HELIOS_STATE_HEATING;
 
   if (check_fault_temperature()) {
     return SMF_EVENT_HANDLED;
@@ -497,7 +474,7 @@ static enum smf_state_result heating_helios(void* o)
   if (temperature < FLAME_OUT_TEMP) {
     LOG_ERR("Flame out detected - temperature %.2f°C below threshold %.2f°C",
         temperature, FLAME_OUT_TEMP);
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_ERROR]);
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_ERROR]);
     return SMF_EVENT_HANDLED;
   }
 
@@ -511,7 +488,7 @@ static enum smf_state_result heating_helios(void* o)
  */
 static enum smf_state_result cooldown_helios(void* o)
 {
-  current_state = HELIOS_COOLING;
+  current_state = HELIOS_STATE_COOLING;
 
   if (check_fault_temperature()) {
     return SMF_EVENT_HANDLED;
@@ -523,7 +500,7 @@ static enum smf_state_result cooldown_helios(void* o)
         temperature, helios_state_names[cooldown_return_state]);
 
     // Only reset reached_high_temp if returning to IDLE
-    if (cooldown_return_state == HELIOS_IDLE) {
+    if (cooldown_return_state == HELIOS_STATE_IDLE) {
       reached_high_temp = false;
     }
 
@@ -596,7 +573,7 @@ static void cooldown_exit(void* o)
 
 static enum smf_state_result error_state(void* o)
 {
-  current_state = HELIOS_ERROR;
+  current_state = HELIOS_STATE_ERROR;
 
   if (check_fault_temperature()) {
     return SMF_EVENT_HANDLED;
@@ -605,8 +582,8 @@ static enum smf_state_result error_state(void* o)
   // If temperature is high, transition to cooldown which will return to ERROR
   if (temperature > COOLDOWN_COMPLETE_TEMP) {
     LOG_INF("ERROR state - temperature %.2f°C requires cooldown", temperature);
-    cooldown_return_state = HELIOS_ERROR;
-    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_COOLING]);
+    cooldown_return_state = HELIOS_STATE_ERROR;
+    smf_set_state(SMF_CTX(&helios_state_ctx), &helios_state_machine[HELIOS_STATE_COOLING]);
     return SMF_EVENT_HANDLED;
   }
 
@@ -631,7 +608,7 @@ static void emergency_stop_entry(void* o)
 
 static enum smf_state_result emergency_stop(void* o)
 {
-  current_state = HELIOS_E_STOP;
+  current_state = HELIOS_STATE_E_STOP;
   // Terminal state - requires power cycle to exit
   // Log periodically to indicate E_STOP is active
   LOG_ERR_RATELIMIT("System in EMERGENCY STOP - power cycle required");
@@ -643,19 +620,19 @@ static enum smf_state_result emergency_stop(void* o)
 //////////////////////////////////////////////////////////////
 
 static const struct smf_state helios_state_machine[] = {
-  [HELIOS_INITIALIZING] = SMF_CREATE_STATE(NULL, initialize_helios, NULL, NULL, NULL),
-  [HELIOS_IDLE] = SMF_CREATE_STATE(idle_entry, idle, NULL, NULL, NULL),
-  [HELIOS_BLOWING] = SMF_CREATE_STATE(NULL, blowing, stop_blowing_helios, NULL, NULL),
-  [HELIOS_PREHEAT] = SMF_CREATE_STATE(start_preheat, preheat_helios,
+  [HELIOS_STATE_INITIALIZING] = SMF_CREATE_STATE(NULL, initialize_helios, NULL, NULL, NULL),
+  [HELIOS_STATE_IDLE] = SMF_CREATE_STATE(idle_entry, idle, NULL, NULL, NULL),
+  [HELIOS_STATE_BLOWING] = SMF_CREATE_STATE(NULL, blowing, stop_blowing_helios, NULL, NULL),
+  [HELIOS_STATE_PREHEAT] = SMF_CREATE_STATE(start_preheat, preheat_helios,
       end_preheat, NULL, NULL),
-  [HELIOS_PREHEAT_STAGE_2] = SMF_CREATE_STATE(NULL, preheat_stage_2,
+  [HELIOS_STATE_PREHEAT_STAGE_2] = SMF_CREATE_STATE(NULL, preheat_stage_2,
       NULL, NULL, NULL),
-  [HELIOS_HEATING] = SMF_CREATE_STATE(heating_entry, heating_helios,
+  [HELIOS_STATE_HEATING] = SMF_CREATE_STATE(heating_entry, heating_helios,
       heating_exit, NULL, NULL),
-  [HELIOS_COOLING] = SMF_CREATE_STATE(cooldown_entry, cooldown_helios,
+  [HELIOS_STATE_COOLING] = SMF_CREATE_STATE(cooldown_entry, cooldown_helios,
       cooldown_exit, NULL, NULL),
-  [HELIOS_ERROR] = SMF_CREATE_STATE(NULL, error_state, NULL, NULL, NULL),
-  [HELIOS_E_STOP] = SMF_CREATE_STATE(emergency_stop_entry, emergency_stop,
+  [HELIOS_STATE_ERROR] = SMF_CREATE_STATE(NULL, error_state, NULL, NULL, NULL),
+  [HELIOS_STATE_E_STOP] = SMF_CREATE_STATE(emergency_stop_entry, emergency_stop,
       NULL, NULL, NULL),
 };
 
@@ -710,14 +687,14 @@ static bool state_command_validator(const void* msg, size_t msg_size)
 {
   const struct state_command_msg* cmd = msg;
   LOG_DBG("got state command %s - %d", helios_mode_names[cmd->mode], cmd->argument);
-  if (cmd->mode == HELIOS_FAN_MODE) {
+  if (cmd->mode == HELIOS_MODE_FAN) {
     if (cmd->argument != 0 && (cmd->argument > max_rpm || cmd->argument < min_rpm)) {
       LOG_DBG("can't set fan RPM, value too high or too low");
       return false;
     }
   }
 
-  if (cmd->mode == HELIOS_HEAT_MODE && current_state != HELIOS_IDLE) {
+  if (cmd->mode == HELIOS_MODE_HEAT && current_state != HELIOS_STATE_IDLE) {
     LOG_DBG("can't start heat mode, helios is not idle");
     return false;
   }
@@ -730,43 +707,43 @@ static void state_command_callback(const struct zbus_channel* chan)
   const struct state_command_msg* msg = zbus_chan_const_msg(chan);
   k_mutex_lock(&state_machine_mutex, MUTEX_WAIT);
 
-  if (msg->mode == HELIOS_FAN_MODE) {
+  if (msg->mode == HELIOS_MODE_FAN) {
     if (msg->argument == 0) {
       smf_set_state(SMF_CTX(&helios_state_ctx),
-          &helios_state_machine[HELIOS_IDLE]);
+          &helios_state_machine[HELIOS_STATE_IDLE]);
     } else {
-      if (current_state != HELIOS_BLOWING) {
+      if (current_state != HELIOS_STATE_BLOWING) {
         smf_set_state(SMF_CTX(&helios_state_ctx),
-            &helios_state_machine[HELIOS_BLOWING]);
+            &helios_state_machine[HELIOS_STATE_BLOWING]);
       }
       set_rpm(msg->argument);
     }
   }
 
-  if (msg->mode == HELIOS_IDLE_MODE) {
+  if (msg->mode == HELIOS_MODE_IDLE) {
     // Check if cooldown is required before transitioning to idle
     // Cooldown needed if burner reached operating temp (≥190°C) and is still hot
     if (reached_high_temp && temperature > COOLDOWN_COMPLETE_TEMP) {
       LOG_INF("Temperature is %.2f°C - initiating cooldown procedure", temperature);
-      cooldown_return_state = HELIOS_IDLE;
+      cooldown_return_state = HELIOS_STATE_IDLE;
       smf_set_state(SMF_CTX(&helios_state_ctx),
-          &helios_state_machine[HELIOS_COOLING]);
+          &helios_state_machine[HELIOS_STATE_COOLING]);
     } else {
       smf_set_state(SMF_CTX(&helios_state_ctx),
-          &helios_state_machine[HELIOS_IDLE]);
+          &helios_state_machine[HELIOS_STATE_IDLE]);
     }
   }
 
-  if (msg->mode == HELIOS_HEAT_MODE) {
+  if (msg->mode == HELIOS_MODE_HEAT) {
     user_pump_rate_target = msg->argument;
     smf_set_state(SMF_CTX(&helios_state_ctx),
-        &helios_state_machine[HELIOS_PREHEAT]);
+        &helios_state_machine[HELIOS_STATE_PREHEAT]);
   }
 
-  if (msg->mode == HELIOS_EMERGENCY) {
+  if (msg->mode == HELIOS_MODE_EMERGENCY) {
     LOG_ERR("Emergency mode command received - triggering E_STOP");
     smf_set_state(SMF_CTX(&helios_state_ctx),
-        &helios_state_machine[HELIOS_E_STOP]);
+        &helios_state_machine[HELIOS_STATE_E_STOP]);
   }
 
   k_mutex_unlock(&state_machine_mutex);
@@ -780,7 +757,7 @@ ZBUS_CHAN_DEFINE(state_command_chan, /* Name */
     state_command_validator, /* Validator */
     NULL, /* User Data */
     ZBUS_OBSERVERS(state_command_listener), /* Observers */
-    ZBUS_MSG_INIT(.mode = HELIOS_IDLE_MODE,
+    ZBUS_MSG_INIT(.mode = HELIOS_MODE_IDLE,
         .argument = 0) /* Initial value */
 );
 
@@ -790,6 +767,6 @@ ZBUS_CHAN_DEFINE(state_data_chan, /* Name */
     NULL, /* User Data */
     ZBUS_OBSERVERS_EMPTY, /* Observers */
     ZBUS_MSG_INIT(.code = 0, .error = false,
-        .state = HELIOS_INITIALIZING,
+        .state = HELIOS_STATE_INITIALIZING,
         .timestamp = 0) /* Initial value */
 );
