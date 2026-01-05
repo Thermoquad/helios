@@ -16,18 +16,18 @@
 #include <helios/communications/serial_handler.h>
 #include <helios/zbus.h>
 
-LOG_MODULE_REGISTER(helios_serial_handler);
-
 //////////////////////////////////////////////////////////////
 // Config
 //////////////////////////////////////////////////////////////
 
-#define LOOP_SLEEP_MS 1
+LOG_MODULE_REGISTER(helios_serial_handler);
+
+#define LOOP_SLEEP_US 500  // UART FIFO (32 bytes) fills in 2780us at 115200 baud
 #define DEFAULT_TIMEOUT_INTERVAL_MS 30000
 #define DEFAULT_TELEMETRY_INTERVAL_MS 100
 
 //////////////////////////////////////////////////////////////
-// Serial State
+// State Struct Definition
 //////////////////////////////////////////////////////////////
 
 struct serial_state {
@@ -77,452 +77,16 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
     uint64_t current_micros);
 static void send_packet(const helios_packet_t* packet);
 static void fill_tx_buffer(const helios_packet_t* packet);
-static void uart_isr(const struct device* dev, void* user_data);
+static void poll_uart_rx(void);
+static void poll_uart_tx(void);
 static void process_rx_packets(struct serial_state* state, uint64_t current_micros);
 static void process_tx_queue(void);
 static void check_timeout(struct serial_state* state, uint64_t current_micros);
 static void send_telemetry_bundle(struct serial_state* state, uint64_t current_micros);
 
 //////////////////////////////////////////////////////////////
-// Serial Thread
+// Public API
 //////////////////////////////////////////////////////////////
-
-/**
- * Serial Thread - Handles both TX and RX operations
- *
- * Main thread for serial communication. Processes received commands,
- * transmits responses and telemetry, and handles timeout mode.
- */
-int serial_thread(void)
-{
-  LOG_DBG("Serial thread started");
-
-  // Initialize serial handler
-  int ret = serial_handler_init();
-  if (ret < 0) {
-    LOG_ERR("Failed to initialize serial handler: %d", ret);
-    return ret;
-  }
-
-  // Initialize state
-  serial_state.timeout_enabled = true;
-  serial_state.timeout_interval_ms = DEFAULT_TIMEOUT_INTERVAL_MS;
-  serial_state.last_ping_time = 0;
-  serial_state.telemetry_enabled = false;
-  serial_state.telemetry_interval_ms = DEFAULT_TELEMETRY_INTERVAL_MS;
-  serial_state.telemetry_mode = 0;
-  serial_state.last_telemetry_time = 0;
-
-  while (1) {
-    const uint64_t current_micros = k_cyc_to_us_floor64(k_cycle_get_64());
-
-    // Process all pending RX packets
-    process_rx_packets(&serial_state, current_micros);
-
-    // Check timeout mode
-    check_timeout(&serial_state, current_micros);
-
-    // Send telemetry bundle if enabled
-    send_telemetry_bundle(&serial_state, current_micros);
-
-    // Process one pending TX packet if available
-    process_tx_queue();
-
-    k_sleep(K_MSEC(LOOP_SLEEP_MS));
-  }
-
-  return 0;
-}
-
-//////////////////////////////////////////////////////////////
-// UART Interrupt Service Routine
-//////////////////////////////////////////////////////////////
-
-/**
- * UART ISR - Handles both RX and TX interrupts
- *
- * RX: Decodes incoming bytes and queues complete packets
- * TX: Fills UART FIFO from buffer until transmission complete
- */
-static void uart_isr(const struct device* dev, void* user_data)
-{
-  ARG_UNUSED(user_data);
-
-  uart_irq_update(dev);
-
-  // Handle RX
-  if (uart_irq_rx_ready(dev)) {
-    uint8_t byte;
-    while (uart_fifo_read(dev, &byte, 1) == 1) {
-      helios_packet_t packet;
-      helios_decode_result_t result = helios_decode_byte(byte, &packet, &decoder);
-
-      if (result == HELIOS_DECODE_OK) {
-        // Packet complete - queue for processing in thread context
-        int ret = k_msgq_put(&rx_packet_queue, &packet, K_NO_WAIT);
-        if (ret != 0) {
-          // Queue full - drop packet and log error
-          LOG_ERR("RX queue full, dropping packet type 0x%02X", packet.msg_type);
-        }
-      } else if (result != HELIOS_DECODE_INCOMPLETE) {
-        // Decode error - reset decoder and continue
-        LOG_WRN("Decode error: %d", result);
-        helios_reset_decoder(&decoder);
-      }
-    }
-  }
-
-  // Handle TX
-  if (uart_irq_tx_ready(dev)) {
-    if (tx_index < tx_length) {
-      // Fill FIFO with as much data as possible
-      size_t remaining = tx_length - tx_index;
-      size_t sent = uart_fifo_fill(dev, &tx_buffer[tx_index], remaining);
-      tx_index += sent;
-
-      // Check if transmission complete
-      if (tx_index >= tx_length) {
-        uart_irq_tx_disable(dev);
-        LOG_DBG("TX complete: %zu bytes sent", tx_length);
-      }
-    } else {
-      // No data to send, disable TX interrupt
-      uart_irq_tx_disable(dev);
-    }
-  }
-}
-
-//////////////////////////////////////////////////////////////
-// Packet Processing
-//////////////////////////////////////////////////////////////
-
-/* Initialize Serial Handler */
-int serial_handler_init(void)
-{
-  // Get UART device
-  if (!device_is_ready(uart_dev)) {
-    LOG_ERR("UART device not ready");
-    return -1;
-  }
-
-  LOG_DBG("UART device ready: %s", uart_dev->name);
-
-  // Initialize decoder BEFORE enabling interrupts
-  helios_reset_decoder(&decoder);
-  LOG_DBG("Decoder initialized");
-
-  // Register ISR for both RX and TX
-  uart_irq_callback_set(uart_dev, uart_isr);
-  LOG_DBG("UART ISR registered");
-
-  // Enable RX interrupt (after decoder initialized and FIFO flushed)
-  uart_irq_rx_enable(uart_dev);
-  LOG_DBG("UART RX interrupt enabled");
-
-  // TX interrupt will be enabled on-demand during transmission
-  LOG_INF("Serial handler initialized (interrupt-driven) on %s", uart_dev->name);
-
-  return 0;
-}
-
-/**
- * Process Received Packet
- *
- * Called from serial thread to process packets queued by UART ISR.
- * Handles commands from master controller and updates state.
- */
-static void process_packet(const helios_packet_t* packet, struct serial_state* state,
-    uint64_t current_micros)
-{
-  LOG_DBG("RX packet type 0x%02X, length %d", packet->msg_type,
-      packet->length);
-
-  switch (packet->msg_type) {
-  case HELIOS_MSG_SET_MODE: {
-    if (packet->length != sizeof(helios_cmd_set_mode_t)) {
-      LOG_WRN("Invalid SET_MODE length");
-      return;
-    }
-
-    helios_cmd_set_mode_t* cmd = (helios_cmd_set_mode_t*)packet->payload;
-
-    struct state_command_msg state_cmd;
-    switch (cmd->mode) {
-    case HELIOS_MODE_IDLE:
-      state_cmd.mode = HELIOS_MODE_IDLE;
-      state_cmd.argument = 0;
-      break;
-    case HELIOS_MODE_FAN:
-      state_cmd.mode = HELIOS_MODE_FAN;
-      state_cmd.argument = (int)cmd->parameter; // RPM
-      break;
-    case HELIOS_MODE_HEAT:
-      state_cmd.mode = HELIOS_MODE_HEAT;
-      state_cmd.argument = 0;
-      break;
-    case HELIOS_MODE_EMERGENCY:
-      state_cmd.mode = HELIOS_MODE_EMERGENCY;
-      state_cmd.argument = 0;
-      break;
-    default:
-      LOG_WRN("Invalid mode: 0x%02X", cmd->mode);
-      return;
-    }
-
-    LOG_INF("SET_MODE: mode=%d, arg=%d", state_cmd.mode,
-        state_cmd.argument);
-    zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
-    break;
-  }
-
-  case HELIOS_MSG_SET_PUMP_RATE: {
-    if (packet->length != sizeof(helios_cmd_set_pump_rate_t)) {
-      LOG_WRN("Invalid SET_PUMP_RATE length");
-      return;
-    }
-
-    helios_cmd_set_pump_rate_t* cmd = (helios_cmd_set_pump_rate_t*)packet->payload;
-
-    struct pump_command_msg pump_cmd = { .pump = 0,
-      .rate_ms = (int)cmd->rate_ms };
-
-    LOG_INF("SET_PUMP_RATE: %d ms", pump_cmd.rate_ms);
-    zbus_chan_pub(&pump_command_chan, &pump_cmd, K_NO_WAIT);
-    break;
-  }
-
-  case HELIOS_MSG_SET_TARGET_RPM: {
-    if (packet->length != sizeof(helios_cmd_set_target_rpm_t)) {
-      LOG_WRN("Invalid SET_TARGET_RPM length");
-      return;
-    }
-
-    helios_cmd_set_target_rpm_t* cmd = (helios_cmd_set_target_rpm_t*)packet->payload;
-
-    struct motor_command_msg motor_cmd = {
-      .motor = 0, .rpm = (int)cmd->target_rpm
-    };
-
-    LOG_INF("SET_TARGET_RPM: %d", motor_cmd.rpm);
-    zbus_chan_pub(&motor_command_chan, &motor_cmd, K_NO_WAIT);
-    break;
-  }
-
-  case HELIOS_MSG_PING_REQUEST: {
-    LOG_DBG("Ping request received");
-    state->last_ping_time = current_micros; // Update timeout
-    // Queue ping response for transmission
-    serial_send_ping_response();
-    break;
-  }
-
-  case HELIOS_MSG_SET_TIMEOUT_CONFIG: {
-    if (packet->length != sizeof(helios_cmd_set_timeout_config_t)) {
-      LOG_WRN("Invalid SET_TIMEOUT_CONFIG length");
-      return;
-    }
-
-    helios_cmd_set_timeout_config_t* cmd = (helios_cmd_set_timeout_config_t*)packet->payload;
-
-    state->timeout_enabled = (cmd->timeout_enabled != 0);
-    state->timeout_interval_ms = cmd->timeout_ms;
-
-    LOG_INF("Timeout config: enabled=%d, interval=%u ms",
-        state->timeout_enabled, state->timeout_interval_ms);
-
-    // Reset timeout timer
-    state->last_ping_time = current_micros;
-    break;
-  }
-
-  case HELIOS_MSG_EMERGENCY_STOP: {
-    LOG_WRN("EMERGENCY_STOP received");
-
-    struct state_command_msg state_cmd = { .mode = HELIOS_MODE_EMERGENCY,
-      .argument = 0 };
-    zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
-    break;
-  }
-
-  case HELIOS_MSG_TELEMETRY_CONFIG: {
-    if (packet->length != sizeof(helios_cmd_telemetry_config_t)) {
-      LOG_WRN("Invalid TELEMETRY_CONFIG length: got %d, expected %d",
-          packet->length, sizeof(helios_cmd_telemetry_config_t));
-      return;
-    }
-
-    helios_cmd_telemetry_config_t* cmd = (helios_cmd_telemetry_config_t*)packet->payload;
-
-    LOG_INF("TELEMETRY_CONFIG received: raw enabled=%u, interval=%u, mode=%u",
-        cmd->telemetry_enabled, cmd->interval_ms, cmd->telemetry_mode);
-
-    state->telemetry_enabled = (cmd->telemetry_enabled != 0);
-    state->telemetry_interval_ms = cmd->interval_ms;
-    state->telemetry_mode = cmd->telemetry_mode;
-
-    // Clamp interval to valid range (100-5000 ms)
-    if (state->telemetry_interval_ms < 100) {
-      state->telemetry_interval_ms = 100;
-    } else if (state->telemetry_interval_ms > 5000) {
-      state->telemetry_interval_ms = 5000;
-    }
-
-    LOG_INF("Telemetry config applied: enabled=%d, interval=%u ms, mode=%u",
-        state->telemetry_enabled, state->telemetry_interval_ms, state->telemetry_mode);
-    break;
-  }
-
-  default:
-    LOG_WRN("Unknown message type: 0x%02X", packet->msg_type);
-    break;
-  }
-}
-
-//////////////////////////////////////////////////////////////
-// Thread Helper Functions
-//////////////////////////////////////////////////////////////
-
-/**
- * Process RX Packets
- *
- * Drains RX packet queue and processes all pending packets.
- */
-static void process_rx_packets(struct serial_state* state, uint64_t current_micros)
-{
-  helios_packet_t rx_packet;
-  while (k_msgq_get(&rx_packet_queue, &rx_packet, K_NO_WAIT) == 0) {
-    process_packet(&rx_packet, state, current_micros);
-  }
-}
-
-/**
- * Process TX Queue
- *
- * Processes one packet from TX queue if available.
- */
-static void process_tx_queue(void)
-{
-  helios_packet_t tx_packet;
-  if (k_msgq_get(&tx_packet_queue, &tx_packet, K_NO_WAIT) == 0) {
-    fill_tx_buffer(&tx_packet);
-  }
-}
-
-/**
- * Check Timeout Mode
- *
- * Monitors communication timeout and transitions to IDLE if needed.
- */
-static void check_timeout(struct serial_state* state, uint64_t current_micros)
-{
-  if (!state->timeout_enabled) {
-    return;
-  }
-
-  // On first call (last_time == 0), initialize timer
-  if (state->last_ping_time == 0) {
-    state->last_ping_time = current_micros;
-    return;
-  }
-
-  const uint64_t micros_since_ping = current_micros - state->last_ping_time;
-  if (micros_since_ping < (state->timeout_interval_ms * 1000)) {
-    return;
-  }
-
-  // Disable telemetry on timeout (protocol v1.2)
-  if (state->telemetry_enabled) {
-    LOG_WRN("Communication timeout - disabling telemetry");
-    state->telemetry_enabled = false;
-  }
-
-  // Check current state before transitioning
-  struct state_data_msg state_data;
-  if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) == 0) {
-    // Only transition if not already in IDLE
-    if (state_data.state != HELIOS_STATE_IDLE) {
-      LOG_WRN("Communication timeout - transitioning to IDLE");
-
-      struct state_command_msg cmd = { .mode = HELIOS_MODE_IDLE,
-        .argument = 0 };
-      zbus_chan_pub(&state_command_chan, &cmd, K_NO_WAIT);
-    }
-  }
-
-  // Reset timeout
-  state->last_ping_time = current_micros;
-}
-
-/**
- * Send Telemetry Bundle
- *
- * Sends periodic telemetry bundle if enabled.
- */
-static void send_telemetry_bundle(struct serial_state* state, uint64_t current_micros)
-{
-  if (!state->telemetry_enabled) {
-    return;
-  }
-
-  // On first call (last_time == 0), send immediately
-  if (state->last_telemetry_time == 0) {
-    serial_send_telemetry_bundle();
-    state->last_telemetry_time = current_micros;
-    return;
-  }
-
-  const uint64_t micros_since_telemetry = current_micros - state->last_telemetry_time;
-  if (micros_since_telemetry < (state->telemetry_interval_ms * 1000)) {
-    return;
-  }
-
-  serial_send_telemetry_bundle();
-  state->last_telemetry_time = current_micros;
-}
-
-//////////////////////////////////////////////////////////////
-// Packet Transmission
-//////////////////////////////////////////////////////////////
-
-/**
- * Queue Packet for Transmission
- *
- * Queues packet for transmission by serial thread.
- */
-static void send_packet(const helios_packet_t* packet)
-{
-  int ret = k_msgq_put(&tx_packet_queue, packet, K_NO_WAIT);
-  if (ret != 0) {
-    LOG_ERR("TX queue full, dropping packet type 0x%02X", packet->msg_type);
-  }
-}
-
-/* Transmit Packet - Actual UART transmission (called from TX thread) */
-static void fill_tx_buffer(const helios_packet_t* packet)
-{
-  // Lock to prevent concurrent transmission attempts
-  k_mutex_lock(&tx_mutex, K_FOREVER);
-
-  // Encode packet to buffer
-  int encoded_len = helios_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
-
-  if (encoded_len < 0) {
-    LOG_ERR("Failed to encode packet: %d", encoded_len);
-    k_mutex_unlock(&tx_mutex);
-    return;
-  }
-
-  // Prepare TX state
-  tx_index = 0;
-  tx_length = (size_t)encoded_len;
-
-  LOG_DBG("Starting TX: type=0x%02X, %zu bytes", packet->msg_type, tx_length);
-
-  // Enable TX interrupt - this will trigger ISR to start sending
-  uart_irq_tx_enable(uart_dev);
-
-  k_mutex_unlock(&tx_mutex);
-}
 
 /**
  * Send Telemetry Bundle
@@ -613,7 +177,9 @@ void serial_send_telemetry_bundle(void)
   }
 }
 
-/* Send Ping Response */
+/**
+ * Send Ping Response
+ */
 void serial_send_ping_response(void)
 {
   helios_packet_t packet;
@@ -623,10 +189,6 @@ void serial_send_ping_response(void)
   LOG_DBG_RATELIMIT("Sending ping response (uptime=%llu ms)", uptime);
   send_packet(&packet);
 }
-
-//////////////////////////////////////////////////////////////
-// Public API
-//////////////////////////////////////////////////////////////
 
 /**
  * Get Timeout Configuration
@@ -653,4 +215,526 @@ void serial_set_timeout_enabled(bool enabled)
   serial_state.timeout_enabled = enabled;
   // Reset timeout timer when changing state
   serial_state.last_ping_time = k_cyc_to_us_floor64(k_cycle_get_64());
+}
+
+//////////////////////////////////////////////////////////////
+// Thread Functions
+//////////////////////////////////////////////////////////////
+
+/**
+ * Serial RX Thread - High-priority UART reception only
+ *
+ * Dedicated thread for receiving bytes and decoding packets.
+ * Runs at highest priority with fast polling to prevent FIFO overflow.
+ * Only polls UART and queues packets - does not process them.
+ */
+int serial_rx_thread(void)
+{
+  LOG_DBG("Serial RX thread started");
+
+  // Initialize serial handler
+  int ret = serial_handler_init();
+  if (ret < 0) {
+    LOG_ERR("Failed to initialize serial handler: %d", ret);
+    return ret;
+  }
+
+  // Initialize state
+  serial_state.timeout_enabled = true;
+  serial_state.timeout_interval_ms = DEFAULT_TIMEOUT_INTERVAL_MS;
+  serial_state.last_ping_time = 0;
+  serial_state.telemetry_enabled = false;
+  serial_state.telemetry_interval_ms = DEFAULT_TELEMETRY_INTERVAL_MS;
+  serial_state.telemetry_mode = 0;
+  serial_state.last_telemetry_time = 0;
+
+  while (1) {
+    // Poll UART for incoming data and decode (time-critical)
+    poll_uart_rx();
+
+    k_sleep(K_USEC(LOOP_SLEEP_US));
+  }
+
+  return 0;
+}
+
+/**
+ * Serial TX Thread - UART transmission only
+ *
+ * Handles UART TX polling and TX queue processing.
+ * Pops packets from queue and fills TX buffer, then polls UART to send bytes.
+ */
+int serial_tx_thread(void)
+{
+  LOG_DBG("Serial TX thread started");
+
+  // Wait for RX thread to initialize serial
+  k_sleep(K_MSEC(100));
+
+  while (1) {
+    // Poll UART for TX readiness and send queued data
+    poll_uart_tx();
+
+    // Process one pending TX packet if available (pops from queue, fills buffer)
+    process_tx_queue();
+
+    k_sleep(K_MSEC(1));  // TX thread can run slower (1ms)
+  }
+
+  return 0;
+}
+
+/**
+ * Serial Processing Thread - Protocol logic and packet processing
+ *
+ * Handles all higher-level protocol logic:
+ * - Processing received packets from RX queue
+ * - Timeout checking and auto-IDLE transition
+ * - Periodic telemetry transmission
+ *
+ * Runs at moderate priority between RX and TX.
+ */
+int serial_processing_thread(void)
+{
+  LOG_DBG("Serial processing thread started");
+
+  // Wait for RX thread to initialize serial and state
+  k_sleep(K_MSEC(200));
+
+  while (1) {
+    const uint64_t current_micros = k_cyc_to_us_floor64(k_cycle_get_64());
+
+    // Process all pending RX packets (pops from queue, processes commands)
+    process_rx_packets(&serial_state, current_micros);
+
+    // Check timeout mode (30s default - auto-transition to IDLE)
+    check_timeout(&serial_state, current_micros);
+
+    // Send telemetry bundle if enabled (periodic broadcast)
+    send_telemetry_bundle(&serial_state, current_micros);
+
+    k_sleep(K_MSEC(10));  // Processing thread runs at 10ms
+  }
+
+  return 0;
+}
+
+//////////////////////////////////////////////////////////////
+// Init Functions
+//////////////////////////////////////////////////////////////
+
+/**
+ * Initialize Serial Handler
+ */
+static int serial_handler_init(void)
+{
+  // Get UART device
+  if (!device_is_ready(uart_dev)) {
+    LOG_ERR("UART device not ready");
+    return -1;
+  }
+
+  LOG_DBG("UART device ready: %s", uart_dev->name);
+
+  // Initialize decoder
+  helios_reset_decoder(&decoder);
+  LOG_DBG("Decoder initialized");
+
+  LOG_INF("Serial handler initialized (polling mode) on %s", uart_dev->name);
+
+  return 0;
+}
+
+//////////////////////////////////////////////////////////////
+// Hardware Functions
+//////////////////////////////////////////////////////////////
+
+/**
+ * Poll UART RX - Reads available bytes and decodes packets
+ *
+ * Processes up to 32 bytes per call to keep iterations short.
+ * Queues complete packets for processing in thread context.
+ */
+static void poll_uart_rx(void)
+{
+  uint8_t byte;
+  int max_bytes = 32; // Limit bytes per poll
+
+  while (max_bytes-- > 0 && uart_poll_in(uart_dev, &byte) == 0) {
+    helios_packet_t packet;
+
+    // Save state BEFORE decoding for diagnostics
+    uint8_t prev_state = decoder.state;
+    size_t prev_index = decoder.buffer_index;
+
+    helios_decode_result_t result = helios_decode_byte(byte, &packet, &decoder);
+
+    if (result == HELIOS_DECODE_OK) {
+      // Packet complete - queue for processing
+      int ret = k_msgq_put(&rx_packet_queue, &packet, K_NO_WAIT);
+      if (ret != 0) {
+        LOG_ERR("RX queue full, dropping packet type 0x%02X", packet.msg_type);
+      }
+    } else if (result != HELIOS_DECODE_INCOMPLETE) {
+      // Decode error - reset decoder and continue
+      LOG_ERR("DECODE ERROR: result=%d, last_byte=0x%02X",
+              result, byte);
+      LOG_ERR("  State: prev=%u → curr=%u, Index: prev=%zu → curr=%zu",
+              prev_state, decoder.state, prev_index, decoder.buffer_index);
+      LOG_ERR("  escape_next=%d", decoder.escape_next);
+
+      // Log last few bytes in decoder buffer
+      if (decoder.buffer_index > 0) {
+        size_t log_start = (decoder.buffer_index > 16) ? decoder.buffer_index - 16 : 0;
+        LOG_ERR("  Last bytes in buffer (from [%zu]):", log_start);
+        for (size_t i = log_start; i < decoder.buffer_index && i < log_start + 16; i += 8) {
+          size_t bytes_left = (decoder.buffer_index - i < 8) ? decoder.buffer_index - i : 8;
+          if (bytes_left >= 8) {
+            LOG_ERR("    [%02zu]: %02X %02X %02X %02X %02X %02X %02X %02X", i,
+                    decoder.buffer[i+0], decoder.buffer[i+1], decoder.buffer[i+2], decoder.buffer[i+3],
+                    decoder.buffer[i+4], decoder.buffer[i+5], decoder.buffer[i+6], decoder.buffer[i+7]);
+          } else {
+            LOG_ERR("    [%02zu]: partial (%zu bytes)", i, bytes_left);
+          }
+        }
+      }
+
+      helios_reset_decoder(&decoder);
+    }
+  }
+}
+
+/**
+ * Poll UART TX - Sends buffered data as fast as UART can accept
+ *
+ * Fills UART FIFO completely each poll to maximize throughput.
+ */
+static void poll_uart_tx(void)
+{
+  if (tx_index < tx_length) {
+    // Send as many bytes as possible while UART is ready
+    while (tx_index < tx_length) {
+      uart_poll_out(uart_dev, tx_buffer[tx_index]);
+      tx_index++;
+    }
+
+    // Transmission complete
+    if (tx_index >= tx_length) {
+      LOG_DBG("TX complete: %zu bytes sent", tx_length);
+    }
+  }
+}
+
+//////////////////////////////////////////////////////////////
+// Helper Functions - Packet Processing
+//////////////////////////////////////////////////////////////
+
+/**
+ * Process Received Packet
+ *
+ * Called from serial thread to process packets queued by UART ISR.
+ * Handles commands from master controller and updates state.
+ */
+static void process_packet(const helios_packet_t* packet, struct serial_state* state,
+    uint64_t current_micros)
+{
+  LOG_DBG("RX packet type 0x%02X, length %d", packet->msg_type,
+      packet->length);
+
+  switch (packet->msg_type) {
+  case HELIOS_MSG_STATE_COMMAND: {
+    if (packet->length != sizeof(helios_cmd_set_mode_t)) {
+      LOG_WRN("Invalid STATE_COMMAND length");
+      return;
+    }
+
+    helios_cmd_set_mode_t* cmd = (helios_cmd_set_mode_t*)packet->payload;
+
+    struct state_command_msg state_cmd;
+    switch (cmd->mode) {
+    case HELIOS_MODE_IDLE:
+      state_cmd.mode = HELIOS_MODE_IDLE;
+      state_cmd.argument = 0;
+      break;
+    case HELIOS_MODE_FAN:
+      state_cmd.mode = HELIOS_MODE_FAN;
+      state_cmd.argument = (int)cmd->parameter; // RPM
+      break;
+    case HELIOS_MODE_HEAT:
+      state_cmd.mode = HELIOS_MODE_HEAT;
+      state_cmd.argument = 0;
+      break;
+    case HELIOS_MODE_EMERGENCY:
+      state_cmd.mode = HELIOS_MODE_EMERGENCY;
+      state_cmd.argument = 0;
+      break;
+    default:
+      LOG_WRN("Invalid mode: 0x%02X", cmd->mode);
+      return;
+    }
+
+    LOG_INF("SET_MODE: mode=%d, arg=%d", state_cmd.mode,
+        state_cmd.argument);
+    zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
+    break;
+  }
+
+  case HELIOS_MSG_PUMP_COMMAND: {
+    if (packet->length != sizeof(helios_cmd_set_pump_rate_t)) {
+      LOG_WRN("Invalid PUMP_COMMAND length");
+      return;
+    }
+
+    helios_cmd_set_pump_rate_t* cmd = (helios_cmd_set_pump_rate_t*)packet->payload;
+
+    struct pump_command_msg pump_cmd = { .pump = 0,
+      .rate_ms = (int)cmd->rate_ms };
+
+    LOG_INF("SET_PUMP_RATE: %d ms", pump_cmd.rate_ms);
+    zbus_chan_pub(&pump_command_chan, &pump_cmd, K_NO_WAIT);
+    break;
+  }
+
+  case HELIOS_MSG_MOTOR_COMMAND: {
+    if (packet->length != sizeof(helios_cmd_set_target_rpm_t)) {
+      LOG_WRN("Invalid MOTOR_COMMAND length");
+      return;
+    }
+
+    helios_cmd_set_target_rpm_t* cmd = (helios_cmd_set_target_rpm_t*)packet->payload;
+
+    struct motor_command_msg motor_cmd = {
+      .motor = 0, .rpm = (int)cmd->target_rpm
+    };
+
+    LOG_INF("SET_TARGET_RPM: %d", motor_cmd.rpm);
+    zbus_chan_pub(&motor_command_chan, &motor_cmd, K_NO_WAIT);
+    break;
+  }
+
+  case HELIOS_MSG_PING_REQUEST: {
+    LOG_DBG("Ping request received");
+    state->last_ping_time = current_micros; // Update timeout
+    serial_send_ping_response();
+    break;
+  }
+
+  case HELIOS_MSG_SET_TIMEOUT_CONFIG: {
+    if (packet->length != sizeof(helios_cmd_set_timeout_config_t)) {
+      LOG_WRN("Invalid SET_TIMEOUT_CONFIG length");
+      return;
+    }
+
+    helios_cmd_set_timeout_config_t* cmd = (helios_cmd_set_timeout_config_t*)packet->payload;
+
+    state->timeout_enabled = (cmd->timeout_enabled != 0);
+    state->timeout_interval_ms = cmd->timeout_ms;
+
+    LOG_INF("Timeout config: enabled=%d, interval=%u ms",
+        state->timeout_enabled, state->timeout_interval_ms);
+
+    // Reset timeout timer
+    state->last_ping_time = current_micros;
+    break;
+  }
+
+  case HELIOS_MSG_EMERGENCY_STOP: {
+    LOG_WRN("EMERGENCY_STOP received");
+
+    struct state_command_msg state_cmd = { .mode = HELIOS_MODE_EMERGENCY,
+      .argument = 0 };
+    zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
+    break;
+  }
+
+  case HELIOS_MSG_TELEMETRY_CONFIG: {
+    if (packet->length != sizeof(helios_cmd_telemetry_config_t)) {
+      LOG_WRN("Invalid TELEMETRY_CONFIG length: got %d, expected %d",
+          packet->length, sizeof(helios_cmd_telemetry_config_t));
+      return;
+    }
+
+    helios_cmd_telemetry_config_t* cmd = (helios_cmd_telemetry_config_t*)packet->payload;
+
+    LOG_DBG("TELEMETRY_CONFIG received: raw enabled=%u, interval=%u, mode=%u",
+        cmd->telemetry_enabled, cmd->interval_ms, cmd->telemetry_mode);
+
+    bool was_enabled = state->telemetry_enabled;
+    state->telemetry_enabled = (cmd->telemetry_enabled != 0);
+    state->telemetry_interval_ms = cmd->interval_ms;
+    state->telemetry_mode = cmd->telemetry_mode;
+
+    // Clamp interval to valid range (100-5000 ms)
+    if (state->telemetry_interval_ms < 100) {
+      state->telemetry_interval_ms = 100;
+    } else if (state->telemetry_interval_ms > 5000) {
+      state->telemetry_interval_ms = 5000;
+    }
+
+    // Log INF only when telemetry is first enabled
+    if (state->telemetry_enabled && !was_enabled) {
+      LOG_INF("Telemetry enabled: interval=%u ms, mode=%u",
+          state->telemetry_interval_ms, state->telemetry_mode);
+    } else {
+      LOG_DBG("Telemetry config applied: enabled=%d, interval=%u ms, mode=%u",
+          state->telemetry_enabled, state->telemetry_interval_ms, state->telemetry_mode);
+    }
+    break;
+  }
+
+  default:
+    LOG_WRN("Unknown message type: 0x%02X", packet->msg_type);
+    break;
+  }
+}
+
+/**
+ * Process RX Packets
+ *
+ * Drains RX packet queue and processes all pending packets.
+ */
+static void process_rx_packets(struct serial_state* state, uint64_t current_micros)
+{
+  helios_packet_t rx_packet;
+  while (k_msgq_get(&rx_packet_queue, &rx_packet, K_NO_WAIT) == 0) {
+    process_packet(&rx_packet, state, current_micros);
+  }
+}
+
+/**
+ * Process TX Queue
+ *
+ * Processes one packet from TX queue if available.
+ * Only dequeues if no transmission is currently in progress.
+ */
+static void process_tx_queue(void)
+{
+  // Don't dequeue if transmission in progress
+  if (tx_index < tx_length) {
+    return;
+  }
+
+  helios_packet_t tx_packet;
+  if (k_msgq_get(&tx_packet_queue, &tx_packet, K_NO_WAIT) == 0) {
+    fill_tx_buffer(&tx_packet);
+  }
+}
+
+/**
+ * Fill TX Buffer - Encodes packet and prepares for transmission
+ *
+ * Called from TX thread to prepare packet for UART transmission.
+ */
+static void fill_tx_buffer(const helios_packet_t* packet)
+{
+  // Lock to prevent concurrent transmission attempts
+  k_mutex_lock(&tx_mutex, K_FOREVER);
+
+  // Encode packet to buffer
+  int encoded_len = helios_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
+
+  if (encoded_len < 0) {
+    LOG_ERR("Failed to encode packet: %d", encoded_len);
+    k_mutex_unlock(&tx_mutex);
+    return;
+  }
+
+  // Prepare TX state
+  tx_index = 0;
+  tx_length = (size_t)encoded_len;
+
+  LOG_DBG("Starting TX: type=0x%02X, %zu bytes", packet->msg_type, tx_length);
+
+  // TX will be sent via polling in main loop
+
+  k_mutex_unlock(&tx_mutex);
+}
+
+/**
+ * Queue Packet for Transmission
+ *
+ * Queues packet for transmission by serial thread.
+ */
+static void send_packet(const helios_packet_t* packet)
+{
+  int ret = k_msgq_put(&tx_packet_queue, packet, K_NO_WAIT);
+  if (ret != 0) {
+    LOG_ERR("TX queue full, dropping packet type 0x%02X", packet->msg_type);
+  }
+}
+
+//////////////////////////////////////////////////////////////
+// Helper Functions - Protocol Handlers
+//////////////////////////////////////////////////////////////
+
+/**
+ * Check Timeout Mode
+ *
+ * Monitors communication timeout and transitions to IDLE if needed.
+ */
+static void check_timeout(struct serial_state* state, uint64_t current_micros)
+{
+  if (!state->timeout_enabled) {
+    return;
+  }
+
+  // On first call (last_time == 0), initialize timer
+  if (state->last_ping_time == 0) {
+    state->last_ping_time = current_micros;
+    return;
+  }
+
+  const uint64_t micros_since_ping = current_micros - state->last_ping_time;
+  if (micros_since_ping < (state->timeout_interval_ms * 1000)) {
+    return;
+  }
+
+  // Disable telemetry on timeout (protocol v1.2)
+  if (state->telemetry_enabled) {
+    LOG_WRN("Communication timeout - disabling telemetry");
+    state->telemetry_enabled = false;
+  }
+
+  // Check current state before transitioning
+  struct state_data_msg state_data;
+  if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) == 0) {
+    // Only transition if not already in IDLE
+    if (state_data.state != HELIOS_STATE_IDLE) {
+      LOG_WRN("Communication timeout - transitioning to IDLE");
+
+      struct state_command_msg cmd = { .mode = HELIOS_MODE_IDLE,
+        .argument = 0 };
+      zbus_chan_pub(&state_command_chan, &cmd, K_NO_WAIT);
+    }
+  }
+
+  // Reset timeout
+  state->last_ping_time = current_micros;
+}
+
+/**
+ * Send Telemetry Bundle
+ *
+ * Sends periodic telemetry bundle if enabled.
+ */
+static void send_telemetry_bundle(struct serial_state* state, uint64_t current_micros)
+{
+  if (!state->telemetry_enabled) {
+    return;
+  }
+
+  // On first call (last_time == 0), send immediately
+  if (state->last_telemetry_time == 0) {
+    serial_send_telemetry_bundle();
+    state->last_telemetry_time = current_micros;
+    return;
+  }
+
+  const uint64_t micros_since_telemetry = current_micros - state->last_telemetry_time;
+  if (micros_since_telemetry < (state->telemetry_interval_ms * 1000)) {
+    return;
+  }
+
+  serial_send_telemetry_bundle();
+  state->last_telemetry_time = current_micros;
 }
