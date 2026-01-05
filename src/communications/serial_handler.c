@@ -22,7 +22,7 @@
 
 LOG_MODULE_REGISTER(helios_serial_handler);
 
-#define LOOP_SLEEP_US 500  // UART FIFO (32 bytes) fills in 2780us at 115200 baud
+#define LOOP_SLEEP_US 500 // UART FIFO (32 bytes) fills in 2780us at 115200 baud
 #define DEFAULT_TIMEOUT_INTERVAL_MS 30000
 #define DEFAULT_TELEMETRY_INTERVAL_MS 100
 
@@ -57,9 +57,8 @@ static helios_decoder_t decoder;
 static uint8_t tx_buffer[HELIOS_MAX_PACKET_SIZE * 2]; // 2x for stuffing overhead
 static size_t tx_index = 0;
 static size_t tx_length = 0;
-K_MUTEX_DEFINE(tx_mutex); // Protects TX buffer and state
 
-/* TX Packet Queue - API pushes, thread pops and transmits */
+/* TX Packet Queue - API pushes, thread pops */
 K_MSGQ_DEFINE(tx_packet_queue, sizeof(helios_packet_t), 8, 4);
 
 /* RX Packet Queue - ISR pushes, thread pops */
@@ -278,7 +277,7 @@ int serial_tx_thread(void)
     // Process one pending TX packet if available (pops from queue, fills buffer)
     process_tx_queue();
 
-    k_sleep(K_MSEC(1));  // TX thread can run slower (1ms)
+    k_sleep(K_MSEC(1)); // TX thread can run slower (1ms)
   }
 
   return 0;
@@ -313,7 +312,7 @@ int serial_processing_thread(void)
     // Send telemetry bundle if enabled (periodic broadcast)
     send_telemetry_bundle(&serial_state, current_micros);
 
-    k_sleep(K_MSEC(10));  // Processing thread runs at 10ms
+    k_sleep(K_MSEC(10)); // Processing thread runs at 10ms
   }
 
   return 0;
@@ -378,9 +377,9 @@ static void poll_uart_rx(void)
     } else if (result != HELIOS_DECODE_INCOMPLETE) {
       // Decode error - reset decoder and continue
       LOG_ERR("DECODE ERROR: result=%d, last_byte=0x%02X",
-              result, byte);
+          result, byte);
       LOG_ERR("  State: prev=%u → curr=%u, Index: prev=%zu → curr=%zu",
-              prev_state, decoder.state, prev_index, decoder.buffer_index);
+          prev_state, decoder.state, prev_index, decoder.buffer_index);
       LOG_ERR("  escape_next=%d", decoder.escape_next);
 
       // Log last few bytes in decoder buffer
@@ -391,8 +390,8 @@ static void poll_uart_rx(void)
           size_t bytes_left = (decoder.buffer_index - i < 8) ? decoder.buffer_index - i : 8;
           if (bytes_left >= 8) {
             LOG_ERR("    [%02zu]: %02X %02X %02X %02X %02X %02X %02X %02X", i,
-                    decoder.buffer[i+0], decoder.buffer[i+1], decoder.buffer[i+2], decoder.buffer[i+3],
-                    decoder.buffer[i+4], decoder.buffer[i+5], decoder.buffer[i+6], decoder.buffer[i+7]);
+                decoder.buffer[i + 0], decoder.buffer[i + 1], decoder.buffer[i + 2], decoder.buffer[i + 3],
+                decoder.buffer[i + 4], decoder.buffer[i + 5], decoder.buffer[i + 6], decoder.buffer[i + 7]);
           } else {
             LOG_ERR("    [%02zu]: partial (%zu bytes)", i, bytes_left);
           }
@@ -623,15 +622,11 @@ static void process_tx_queue(void)
  */
 static void fill_tx_buffer(const helios_packet_t* packet)
 {
-  // Lock to prevent concurrent transmission attempts
-  k_mutex_lock(&tx_mutex, K_FOREVER);
-
   // Encode packet to buffer
   int encoded_len = helios_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
 
   if (encoded_len < 0) {
     LOG_ERR("Failed to encode packet: %d", encoded_len);
-    k_mutex_unlock(&tx_mutex);
     return;
   }
 
@@ -640,10 +635,6 @@ static void fill_tx_buffer(const helios_packet_t* packet)
   tx_length = (size_t)encoded_len;
 
   LOG_DBG("Starting TX: type=0x%02X, %zu bytes", packet->msg_type, tx_length);
-
-  // TX will be sent via polling in main loop
-
-  k_mutex_unlock(&tx_mutex);
 }
 
 /**
