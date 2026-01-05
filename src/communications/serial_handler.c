@@ -512,38 +512,34 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
     break;
   }
 
+  case HELIOS_MSG_GLOW_COMMAND: {
+    if (packet->length != sizeof(helios_cmd_glow_t)) {
+      LOG_WRN("Invalid GLOW_COMMAND length");
+      return;
+    }
+
+    helios_cmd_glow_t* cmd = (helios_cmd_glow_t*)packet->payload;
+
+    // Validate duration (0-300000 ms)
+    if (cmd->duration < 0 || cmd->duration > 300000) {
+      LOG_WRN("Invalid glow duration: %d ms", cmd->duration);
+      return;
+    }
+
+    // Send to glow controller via zbus
+    struct glow_command_msg glow_cmd = {
+      .glow = cmd->glow,
+      .duration = cmd->duration
+    };
+    zbus_chan_pub(&glow_command_chan, &glow_cmd, K_NO_WAIT);
+    LOG_DBG("Glow command: glow=%d, duration=%d ms", cmd->glow, cmd->duration);
+    break;
+  }
+
   case HELIOS_MSG_PING_REQUEST: {
     LOG_DBG("Ping request received");
     state->last_ping_time = current_micros; // Update timeout
     serial_send_ping_response();
-    break;
-  }
-
-  case HELIOS_MSG_SET_TIMEOUT_CONFIG: {
-    if (packet->length != sizeof(helios_cmd_set_timeout_config_t)) {
-      LOG_WRN("Invalid SET_TIMEOUT_CONFIG length");
-      return;
-    }
-
-    helios_cmd_set_timeout_config_t* cmd = (helios_cmd_set_timeout_config_t*)packet->payload;
-
-    state->timeout_enabled = (cmd->timeout_enabled != 0);
-    state->timeout_interval_ms = cmd->timeout_ms;
-
-    LOG_INF("Timeout config: enabled=%d, interval=%u ms",
-        state->timeout_enabled, state->timeout_interval_ms);
-
-    // Reset timeout timer
-    state->last_ping_time = current_micros;
-    break;
-  }
-
-  case HELIOS_MSG_EMERGENCY_STOP: {
-    LOG_WRN("EMERGENCY_STOP received");
-
-    struct state_command_msg state_cmd = { .mode = HELIOS_MODE_EMERGENCY,
-      .argument = 0 };
-    zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
     break;
   }
 
