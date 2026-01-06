@@ -256,8 +256,7 @@ helios/
 │       ├── pump.c              # Fuel pump control
 │       └── glow.c              # Glow plug control
 └── docs/
-    ├── state_machine.md        # Complete state machine spec
-    └── serial_protocol.md      # UART/LIN protocol spec
+    └── state_machine.md        # Complete state machine spec
 ```
 
 ---
@@ -351,7 +350,7 @@ fake_temp <temp>       # Inject fake temperature reading
 
 ## Serial Protocol
 
-**Documentation:** `docs/serial_protocol.md`
+**Documentation:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
 
 **Status:** ✅ Implemented
 
