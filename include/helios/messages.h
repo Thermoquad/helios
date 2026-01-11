@@ -11,14 +11,14 @@
 //////////////////////////////////////////////////////////////
 
 struct state_command_msg {
-  helios_mode_t mode;
+  fusain_mode_t mode;
   int argument;
 };
 
 struct state_data_msg {
   bool error;
   int code;
-  helios_state_t state;
+  fusain_state_t state;
   unsigned timestamp;
 };
 

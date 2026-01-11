@@ -350,7 +350,11 @@ fake_temp <temp>       # Inject fake temperature reading
 
 ## Serial Protocol
 
-**Documentation:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+**Protocol Specification:** `../../origin/documentation/source/specifications/fusain/` (Sphinx docs)
+
+**Reference Implementations:**
+- **C:** `../../modules/lib/fusain/` - Embedded C library (used by Helios)
+- **Go:** `../../tools/heliostat/pkg/fusain/` - Reference Go implementation
 
 **Status:** ✅ Implemented
 
@@ -367,7 +371,7 @@ fake_temp <temp>       # Inject fake temperature reading
 **Key Features:**
 - CRC-16-CCITT error detection
 - Byte stuffing for framing
-- Variable-length telemetry bundles (supports 1-3 motors, 1-3 temperature sensors)
+- Variable-length telemetry bundles
 - Timeout mode (30s default) for safety - auto-transitions to IDLE on communication loss
 - Master/slave architecture (controller is master, ICU is slave)
 
@@ -610,7 +614,13 @@ This project was developed with assistance from Claude (Anthropic). All signific
 - Modular communication library for shared use between ICU and controller
 - Safety features for emergency conditions
 
-**Last Updated:** 2026-01-04
+**Last Updated:** 2026-01-09
+
+---
+
+## AI Assistant Operations
+
+To reload all organization CLAUDE.md files or run a content integrity check, see the **CLAUDE.md Reload** and **Content Integrity Check** sections in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
 
 ---
 

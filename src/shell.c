@@ -19,6 +19,27 @@ LOG_MODULE_REGISTER(helios_shell);
 
 #define PUB_TIMEOUT K_SECONDS(1U)
 
+// State names for display
+static const char* const fusain_state_names[] = {
+  "INIT",    // FUSAIN_STATE_INITIALIZING
+  "IDLE",    // FUSAIN_STATE_IDLE
+  "BLOWING", // FUSAIN_STATE_BLOWING
+  "PREHEAT", // FUSAIN_STATE_PREHEAT
+  "PRE_ST2", // FUSAIN_STATE_PREHEAT_STAGE_2
+  "HEATING", // FUSAIN_STATE_HEATING
+  "COOLING", // FUSAIN_STATE_COOLING
+  "ERROR",   // FUSAIN_STATE_ERROR
+  "E_STOP",  // FUSAIN_STATE_E_STOP
+};
+
+// Mode names for display
+static const char* const fusain_mode_names[] = {
+  "IDLE",      // FUSAIN_MODE_IDLE
+  "FAN",       // FUSAIN_MODE_FAN
+  "HEAT",      // FUSAIN_MODE_HEAT
+  [255] = "EMERGENCY", // FUSAIN_MODE_EMERGENCY
+};
+
 //////////////////////////////////////////////////////////////
 // Helper functions
 //////////////////////////////////////////////////////////////
@@ -34,7 +55,7 @@ int send_state_command(const struct shell* sh, struct state_command_msg* cmd)
       shell_print(sh, "Unable to send state command to Helios");
     }
   }
-  shell_print(sh, "sent state %s command %d", helios_mode_names[cmd->mode], cmd->argument);
+  shell_print(sh, "sent state %s command %d", fusain_mode_names[cmd->mode], cmd->argument);
   return res;
 }
 
@@ -85,7 +106,7 @@ int cmd_get_state(const struct shell* sh, size_t argc, char** argv)
   int ret;
   ret = zbus_chan_read(&state_data_chan, &msg, PUB_TIMEOUT);
   if (ret == 0) {
-    shell_print(sh, "%d - %s", msg.state, helios_state_names[msg.state]);
+    shell_print(sh, "%d - %s", msg.state, fusain_state_names[msg.state]);
   } else {
     shell_print(sh, "Unable to get Helios state");
   }
@@ -95,14 +116,14 @@ int cmd_get_state(const struct shell* sh, size_t argc, char** argv)
 int cmd_set_idle(const struct shell* sh, size_t argc, char** argv)
 {
   struct state_command_msg cmd;
-  cmd.mode = HELIOS_MODE_IDLE;
+  cmd.mode = FUSAIN_MODE_IDLE;
   return send_state_command(sh, &cmd);
 }
 
 int cmd_set_fan(const struct shell* sh, size_t argc, char** argv)
 {
   struct state_command_msg cmd;
-  cmd.mode = HELIOS_MODE_FAN;
+  cmd.mode = FUSAIN_MODE_FAN;
   const int arg = atoi(argv[1]);
   cmd.argument = arg;
   return send_state_command(sh, &cmd);
@@ -111,7 +132,7 @@ int cmd_set_fan(const struct shell* sh, size_t argc, char** argv)
 int cmd_set_heat(const struct shell* sh, size_t argc, char** argv)
 {
   struct state_command_msg cmd;
-  cmd.mode = HELIOS_MODE_HEAT;
+  cmd.mode = FUSAIN_MODE_HEAT;
   const int arg = atoi(argv[1]);
   cmd.argument = arg;
   return send_state_command(sh, &cmd);
