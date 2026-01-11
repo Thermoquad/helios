@@ -12,7 +12,7 @@
 // Config
 //////////////////////////////////////////////////////////////
 
-LOG_MODULE_REGISTER(temperature_controller);
+LOG_MODULE_REGISTER(thermometer_controller);
 
 #define LOOP_SLEEP K_MSEC(10U)
 #define PUB_TIMEOUT K_MSEC(10U)
@@ -127,10 +127,10 @@ static void announce_temperature(struct temperature_state* state, unsigned curre
   // Publish temperature reading with PID control status
   struct temperature_data_msg msg = {
     .thermometer = state->index,
-    .temperature = state->current_temperature,
+    .reading = state->current_temperature,
     .timestamp = current_micros,
     .pid_enabled = state->pid_enabled,
-    .rpm_control_enabled = state->motor_rpm_control_enabled,
+    .temperature_rpm_control = state->motor_rpm_control_enabled,
     .watched_motor = state->watched_motor_index,
     .target_temperature = state->target_temperature
   };
@@ -226,7 +226,7 @@ static int initialize_temp_controllers()
   return 0;
 }
 
-int temperature_controller(void)
+int thermometer_controller(void)
 {
   int ret = 0;
   k_mutex_init(&temperature_mutex);
@@ -386,9 +386,62 @@ void temperature_command_callback(const struct zbus_channel* chan)
 ZBUS_LISTENER_DEFINE(temperature_command_listener, temperature_command_callback);
 ZBUS_LISTENER_DEFINE(temperature_motor_data_listener, motor_data_callback);
 
+bool temp_config_validator(const void* msg, size_t msg_size)
+{
+  const struct temp_config_msg* cfg = msg;
+  if (cfg->thermometer > ARRAY_SIZE(temperature_states) - 1) {
+    LOG_ERR("Invalid thermometer index: %d", cfg->thermometer);
+    return false;
+  }
+  return true;
+}
+
+void temp_config_callback(const struct zbus_channel* chan)
+{
+  const struct temp_config_msg* cfg = zbus_chan_const_msg(chan);
+  LOG_DBG("Got config for thermometer %d", cfg->thermometer);
+
+  k_mutex_lock(&temperature_mutex, MUTEX_WAIT);
+  struct temperature_state* state = &temperature_states[cfg->thermometer];
+
+  // Apply PID gains if present, reset PID state when gains change
+  bool pid_gains_changed = false;
+  if (cfg->pid_kp_present) {
+    state->pid.p_gain = cfg->pid_kp;
+    pid_gains_changed = true;
+    LOG_INF("Thermometer %d: Kp set to %.2f", cfg->thermometer, cfg->pid_kp);
+  }
+  if (cfg->pid_ki_present) {
+    state->pid.i_gain = cfg->pid_ki;
+    pid_gains_changed = true;
+    LOG_INF("Thermometer %d: Ki set to %.2f", cfg->thermometer, cfg->pid_ki);
+  }
+  if (cfg->pid_kd_present) {
+    state->pid.d_gain = cfg->pid_kd;
+    pid_gains_changed = true;
+    LOG_INF("Thermometer %d: Kd set to %.2f", cfg->thermometer, cfg->pid_kd);
+  }
+  if (pid_gains_changed) {
+    reset_pid(&state->pid);
+    LOG_INF("Thermometer %d: PID state reset after gain change", cfg->thermometer);
+  }
+
+  k_mutex_unlock(&temperature_mutex);
+}
+
+ZBUS_LISTENER_DEFINE(temp_config_listener, temp_config_callback);
+
 //////////////////////////////////////////////////////////////
 // Zbus channels
 //////////////////////////////////////////////////////////////
+
+ZBUS_CHAN_DEFINE(temp_config_chan, /* Name */
+    struct temp_config_msg, /* Message type */
+    temp_config_validator, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS(temp_config_listener), /* Observers */
+    ZBUS_MSG_INIT(.thermometer = 0) /* Initial value */
+);
 
 ZBUS_CHAN_DEFINE(temperature_command_chan, /* Name */
     struct temperature_command_msg, /* Message type */
@@ -404,7 +457,7 @@ ZBUS_CHAN_DEFINE(temperature_data_chan, /* Name */
     NULL, /* Validator */
     NULL, /* User Data */
     ZBUS_OBSERVERS(state_data_listener), /* Observers */
-    ZBUS_MSG_INIT(.thermometer = 0, .timestamp = 0, .temperature = 0.0,
-        .pid_enabled = false, .rpm_control_enabled = false,
+    ZBUS_MSG_INIT(.thermometer = 0, .timestamp = 0, .reading = 0.0,
+        .pid_enabled = false, .temperature_rpm_control = false,
         .watched_motor = -1, .target_temperature = 0.0) /* Initial value */
 );

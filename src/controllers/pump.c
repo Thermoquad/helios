@@ -208,6 +208,47 @@ void pump_command_callback(const struct zbus_channel* chan)
 
 ZBUS_LISTENER_DEFINE(pump_controller_listener, pump_command_callback);
 
+bool pump_config_validator(const void* msg, size_t msg_size)
+{
+  const struct pump_config_msg* cfg = msg;
+  if (cfg->pump > ARRAY_SIZE(pumps) - 1) {
+    LOG_ERR("Invalid pump index: %d", cfg->pump);
+    return false;
+  }
+  return true;
+}
+
+void pump_config_callback(const struct zbus_channel* chan)
+{
+  const struct pump_config_msg* cfg = zbus_chan_const_msg(chan);
+  LOG_DBG("Got config for pump %d", cfg->pump);
+
+  k_mutex_lock(&pump_mutex, MUTEX_WAIT);
+  struct pump_state* pump = &pumps[cfg->pump];
+
+  if (cfg->pulse_ms_present && cfg->pulse_ms > 0) {
+    pump->pulse_ms = cfg->pulse_ms;
+    LOG_INF("Pump %d: pulse_ms set to %u", cfg->pump, cfg->pulse_ms);
+  }
+
+  if (cfg->recovery_ms_present) {
+    pump->recovery_ms = cfg->recovery_ms;
+    LOG_INF("Pump %d: recovery_ms set to %u", cfg->pump, cfg->recovery_ms);
+  }
+
+  k_mutex_unlock(&pump_mutex);
+}
+
+ZBUS_LISTENER_DEFINE(pump_config_listener, pump_config_callback);
+
+ZBUS_CHAN_DEFINE(pump_config_chan, /* Name */
+    struct pump_config_msg, /* Message type */
+    pump_config_validator, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS(pump_config_listener), /* Observers */
+    ZBUS_MSG_INIT(.pump = 0) /* Initial value */
+);
+
 ZBUS_CHAN_DEFINE(pump_command_chan, /* Name */
     struct pump_command_msg, /* Message type */
     pump_command_validator, /* Validator */

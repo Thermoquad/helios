@@ -8,7 +8,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 
-#include <helios/communications/serial_handler.h>
+#include <helios/communications/fusain.h>
 #include <helios/zbus.h>
 
 //////////////////////////////////////////////////////////////
@@ -84,7 +84,7 @@ int cmd_fake_temp(const struct shell* sh, size_t argc, char** argv)
   const unsigned current_micros = k_cyc_to_us_floor64(k_cycle_get_64());
 
   struct temperature_data_msg msg = { .thermometer = i,
-    .temperature = current_temperature,
+    .reading = current_temperature,
     .timestamp = current_micros };
   int res = zbus_chan_pub(&temperature_data_chan, &msg, PUB_TIMEOUT);
   if (res != 0) {

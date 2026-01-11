@@ -1,32 +1,42 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Helios Serial Handler - ICU Implementation
+ * Helios Fusain Handler - ICU Implementation
  *
  * Handles UART communication with master controller, processes commands,
  * sends telemetry data, and implements timeout mode for safety.
  */
 
 #include <zephyr/device.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
+#include <zephyr/sys/byteorder.h>
 
 #include <fusain/fusain.h>
 #include <fusain/generated/cbor_decode.h>
 #include <fusain/generated/cbor_types.h>
-#include <helios/communications/serial_handler.h>
+#include <helios/communications/fusain.h>
 #include <helios/zbus.h>
 
 //////////////////////////////////////////////////////////////
 // Config
 //////////////////////////////////////////////////////////////
 
-LOG_MODULE_REGISTER(helios_serial_handler);
+LOG_MODULE_REGISTER(helios_fusain);
 
 #define LOOP_SLEEP_US 500 // UART FIFO (32 bytes) fills in 2780us at 115200 baud
 #define DEFAULT_TIMEOUT_INTERVAL_MS 30000
 #define DEFAULT_TELEMETRY_INTERVAL_MS 100
+#define PUB_TIMEOUT K_MSEC(5) // Timeout for zbus publish/read operations
+
+// Device configuration
+#define DEVICE_MOTOR_COUNT 1
+#define DEVICE_THERMOMETER_COUNT 1
+#define DEVICE_PUMP_COUNT 1
+#define DEVICE_GLOW_COUNT 1
 
 //////////////////////////////////////////////////////////////
 // State Struct Definition
@@ -67,6 +77,9 @@ K_MSGQ_DEFINE(rx_packet_queue, sizeof(fusain_packet_t), 8, 4);
 
 /* Serial State */
 static struct serial_state serial_state;
+
+/* Device Address (from hwinfo) */
+static uint64_t device_address;
 
 //////////////////////////////////////////////////////////////
 // CBOR Helper
@@ -122,17 +135,17 @@ void serial_send_telemetry(void)
 
   // Read current state from Zbus
   struct state_data_msg state_data;
-  if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) != 0) {
+  if (zbus_chan_read(&state_data_chan, &state_data, PUB_TIMEOUT) != 0) {
     return; // Channel not ready
   }
 
   struct motor_data_msg motor_data;
-  if (zbus_chan_read(&motor_data_chan, &motor_data, K_NO_WAIT) != 0) {
+  if (zbus_chan_read(&motor_data_chan, &motor_data, PUB_TIMEOUT) != 0) {
     return; // Channel not ready
   }
 
   struct temperature_data_msg temp_data;
-  if (zbus_chan_read(&temperature_data_chan, &temp_data, K_NO_WAIT) != 0) {
+  if (zbus_chan_read(&temperature_data_chan, &temp_data, PUB_TIMEOUT) != 0) {
     return; // Channel not ready
   }
 
@@ -152,7 +165,7 @@ void serial_send_telemetry(void)
 
   // Send TEMP_DATA
   fusain_create_temp_data(&packet, 0, temp_data.thermometer, temp_data.timestamp,
-      temp_data.temperature);
+      temp_data.reading);
   send_packet(&packet);
 }
 
@@ -314,6 +327,18 @@ static int serial_handler_init(void)
 
   LOG_DBG("UART device ready: %s", uart_dev->name);
 
+  // Get device ID from hardware
+  uint8_t id_buf[8];
+  ssize_t id_len = hwinfo_get_device_id(id_buf, sizeof(id_buf));
+  if (id_len == sizeof(id_buf)) {
+    device_address = sys_get_be64(id_buf);
+    LOG_INF("Device address: 0x%016llx", device_address);
+  } else {
+    LOG_WRN("Failed to get device ID (len=%zd), generating random address", id_len);
+    sys_rand_get(&device_address, sizeof(device_address));
+    LOG_INF("Device address (random): 0x%016llx", device_address);
+  }
+
   // Initialize decoder
   fusain_reset_decoder(&decoder);
   LOG_DBG("Decoder initialized");
@@ -459,7 +484,7 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
 
     LOG_INF("SET_MODE: mode=%d, arg=%d", state_cmd.mode,
         state_cmd.argument);
-    zbus_chan_pub(&state_command_chan, &state_cmd, K_NO_WAIT);
+    zbus_chan_pub(&state_command_chan, &state_cmd, PUB_TIMEOUT);
     break;
   }
 
@@ -480,7 +505,7 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
     };
 
     LOG_INF("SET_PUMP_RATE: %d ms", pump_cmd.rate_ms);
-    zbus_chan_pub(&pump_command_chan, &pump_cmd, K_NO_WAIT);
+    zbus_chan_pub(&pump_command_chan, &pump_cmd, PUB_TIMEOUT);
     break;
   }
 
@@ -501,7 +526,7 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
     };
 
     LOG_INF("SET_TARGET_RPM: %d", motor_cmd.rpm);
-    zbus_chan_pub(&motor_command_chan, &motor_cmd, K_NO_WAIT);
+    zbus_chan_pub(&motor_command_chan, &motor_cmd, PUB_TIMEOUT);
     break;
   }
 
@@ -529,7 +554,7 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
       .glow = (int)decoded.glow_command_payload_glow_index_m,
       .duration = duration
     };
-    zbus_chan_pub(&glow_command_chan, &glow_cmd, K_NO_WAIT);
+    zbus_chan_pub(&glow_command_chan, &glow_cmd, PUB_TIMEOUT);
     LOG_DBG("Glow command: glow=%d, duration=%d ms", glow_cmd.glow, duration);
     break;
   }
@@ -575,6 +600,229 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
       LOG_DBG("Telemetry config applied: enabled=%d, interval=%u ms",
           state->telemetry_enabled, state->telemetry_interval_ms);
     }
+    break;
+  }
+
+  case FUSAIN_MSG_TIMEOUT_CONFIG: {
+    struct timeout_config_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_timeout_config_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode TIMEOUT_CONFIG: %d", ret);
+      return;
+    }
+
+    state->timeout_enabled = decoded.timeout_config_payload_uint0bool;
+    state->timeout_interval_ms = decoded.timeout_config_payload_uint1uint;
+
+    // Clamp interval to valid range (5000-60000 ms)
+    if (state->timeout_interval_ms < 5000) {
+      state->timeout_interval_ms = 5000;
+    } else if (state->timeout_interval_ms > 60000) {
+      state->timeout_interval_ms = 60000;
+    }
+
+    // Reset timeout timer when config changes
+    state->last_ping_time = current_micros;
+
+    LOG_INF("Timeout config: enabled=%d, interval=%u ms",
+        state->timeout_enabled, state->timeout_interval_ms);
+    break;
+  }
+
+  case FUSAIN_MSG_MOTOR_CONFIG: {
+    struct motor_config_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_motor_config_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode MOTOR_CONFIG: %d", ret);
+      return;
+    }
+
+    struct motor_config_msg cfg = {
+      .motor = (uint8_t)decoded.motor_config_payload_motor_index_m,
+      .pwm_period_present = decoded.motor_config_payload_uint1uint_present,
+      .pwm_period = decoded.motor_config_payload_uint1uint.motor_config_payload_uint1uint,
+      .pid_kp_present = decoded.motor_config_payload_uint2float_present,
+      .pid_kp = decoded.motor_config_payload_uint2float.motor_config_payload_uint2float,
+      .pid_ki_present = decoded.motor_config_payload_uint3float_present,
+      .pid_ki = decoded.motor_config_payload_uint3float.motor_config_payload_uint3float,
+      .pid_kd_present = decoded.motor_config_payload_uint4float_present,
+      .pid_kd = decoded.motor_config_payload_uint4float.motor_config_payload_uint4float,
+      .max_rpm_present = decoded.motor_config_payload_uint5int_present,
+      .max_rpm = decoded.motor_config_payload_uint5int.motor_config_payload_uint5int,
+      .min_rpm_present = decoded.motor_config_payload_uint6int_present,
+      .min_rpm = decoded.motor_config_payload_uint6int.motor_config_payload_uint6int,
+      .min_pwm_duty_present = decoded.motor_config_payload_uint7uint_present,
+      .min_pwm_duty = decoded.motor_config_payload_uint7uint.motor_config_payload_uint7uint,
+    };
+
+    LOG_INF("MOTOR_CONFIG: motor=%d", cfg.motor);
+    zbus_chan_pub(&motor_config_chan, &cfg, PUB_TIMEOUT);
+    break;
+  }
+
+  case FUSAIN_MSG_PUMP_CONFIG: {
+    struct pump_config_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_pump_config_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode PUMP_CONFIG: %d", ret);
+      return;
+    }
+
+    struct pump_config_msg cfg = {
+      .pump = (uint8_t)decoded.pump_config_payload_pump_index_m,
+      .pulse_ms_present = decoded.pump_config_payload_uint1uint_present,
+      .pulse_ms = decoded.pump_config_payload_uint1uint.pump_config_payload_uint1uint,
+      .recovery_ms_present = decoded.pump_config_payload_uint2uint_present,
+      .recovery_ms = decoded.pump_config_payload_uint2uint.pump_config_payload_uint2uint,
+    };
+
+    LOG_INF("PUMP_CONFIG: pump=%d", cfg.pump);
+    zbus_chan_pub(&pump_config_chan, &cfg, PUB_TIMEOUT);
+    break;
+  }
+
+  case FUSAIN_MSG_TEMP_CONFIG: {
+    struct temp_config_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_temp_config_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode TEMP_CONFIG: %d", ret);
+      return;
+    }
+
+    struct temp_config_msg cfg = {
+      .thermometer = (uint8_t)decoded.temp_config_payload_thermometer_index_m,
+      .pid_kp_present = decoded.temp_config_payload_uint1float_present,
+      .pid_kp = decoded.temp_config_payload_uint1float.temp_config_payload_uint1float,
+      .pid_ki_present = decoded.temp_config_payload_uint2float_present,
+      .pid_ki = decoded.temp_config_payload_uint2float.temp_config_payload_uint2float,
+      .pid_kd_present = decoded.temp_config_payload_uint3float_present,
+      .pid_kd = decoded.temp_config_payload_uint3float.temp_config_payload_uint3float,
+    };
+
+    LOG_INF("TEMP_CONFIG: thermometer=%d", cfg.thermometer);
+    zbus_chan_pub(&temp_config_chan, &cfg, PUB_TIMEOUT);
+    break;
+  }
+
+  case FUSAIN_MSG_GLOW_CONFIG: {
+    struct glow_config_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_glow_config_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode GLOW_CONFIG: %d", ret);
+      return;
+    }
+
+    struct glow_config_msg cfg = {
+      .glow = (uint8_t)decoded.glow_config_payload_glow_index_m,
+      .max_duration_present = decoded.glow_config_payload_uint1uint_present,
+      .max_duration = decoded.glow_config_payload_uint1uint.glow_config_payload_uint1uint,
+    };
+
+    LOG_INF("GLOW_CONFIG: glow=%d", cfg.glow);
+    zbus_chan_pub(&glow_config_chan, &cfg, PUB_TIMEOUT);
+    break;
+  }
+
+  case FUSAIN_MSG_TEMP_COMMAND: {
+    struct temp_command_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_temp_command_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode TEMP_COMMAND: %d", ret);
+      return;
+    }
+
+    struct temperature_command_msg cmd = {
+      .thermometer = (uint8_t)decoded.temp_command_payload_thermometer_index_m,
+      .type = (enum temperature_command_type)decoded.temp_command_payload_temp_cmd_type_m,
+      .motor_index = decoded.temp_command_payload_motor_index_m_present
+          ? (uint8_t)decoded.temp_command_payload_motor_index_m.temp_command_payload_motor_index_m
+          : 0,
+      .target_temperature = decoded.temp_command_payload_uint3float_present
+          ? decoded.temp_command_payload_uint3float.temp_command_payload_uint3float
+          : 0.0,
+    };
+
+    LOG_INF("TEMP_COMMAND: thermometer=%d, type=%d", cmd.thermometer, cmd.type);
+    zbus_chan_pub(&temperature_command_chan, &cmd, PUB_TIMEOUT);
+    break;
+  }
+
+  case FUSAIN_MSG_SEND_TELEMETRY: {
+    struct send_telemetry_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_send_telemetry_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode SEND_TELEMETRY: %d", ret);
+      return;
+    }
+
+    LOG_DBG("SEND_TELEMETRY: type=%u", decoded.send_telemetry_payload_telemetry_type_m);
+
+    // Send requested telemetry type
+    fusain_packet_t response;
+    switch (decoded.send_telemetry_payload_telemetry_type_m) {
+    case 0: { // State
+      struct state_data_msg state_data;
+      if (zbus_chan_read(&state_data_chan, &state_data, PUB_TIMEOUT) == 0) {
+        fusain_error_t error = state_data.error ? (fusain_error_t)state_data.code : FUSAIN_ERROR_NONE;
+        fusain_create_state_data(&response, device_address, state_data.error ? 1 : 0,
+            error, state_data.state, state_data.timestamp);
+        send_packet(&response);
+      }
+      break;
+    }
+    case 1: { // Motor
+      struct motor_data_msg motor_data;
+      if (zbus_chan_read(&motor_data_chan, &motor_data, PUB_TIMEOUT) == 0) {
+        fusain_create_motor_data(&response, device_address, motor_data.motor,
+            motor_data.timestamp, motor_data.rpm, motor_data.target);
+        send_packet(&response);
+      }
+      break;
+    }
+    case 2: { // Temperature
+      struct temperature_data_msg temp_data;
+      if (zbus_chan_read(&temperature_data_chan, &temp_data, PUB_TIMEOUT) == 0) {
+        fusain_create_temp_data(&response, device_address, temp_data.thermometer,
+            temp_data.timestamp, temp_data.reading);
+        send_packet(&response);
+      }
+      break;
+    }
+    default:
+      LOG_WRN("Unknown telemetry type: %u", decoded.send_telemetry_payload_telemetry_type_m);
+      break;
+    }
+    break;
+  }
+
+  case FUSAIN_MSG_DISCOVERY_REQUEST: {
+    LOG_INF("Discovery request received");
+    fusain_packet_t response;
+    fusain_create_device_announce(&response, device_address,
+        DEVICE_MOTOR_COUNT, DEVICE_THERMOMETER_COUNT,
+        DEVICE_PUMP_COUNT, DEVICE_GLOW_COUNT);
+    send_packet(&response);
     break;
   }
 
@@ -685,14 +933,14 @@ static void check_timeout(struct serial_state* state, uint64_t current_micros)
 
   // Check current state before transitioning
   struct state_data_msg state_data;
-  if (zbus_chan_read(&state_data_chan, &state_data, K_NO_WAIT) == 0) {
+  if (zbus_chan_read(&state_data_chan, &state_data, PUB_TIMEOUT) == 0) {
     // Only transition if not already in IDLE
     if (state_data.state != FUSAIN_STATE_IDLE) {
       LOG_WRN("Communication timeout - transitioning to IDLE");
 
       struct state_command_msg cmd = { .mode = FUSAIN_MODE_IDLE,
         .argument = 0 };
-      zbus_chan_pub(&state_command_chan, &cmd, K_NO_WAIT);
+      zbus_chan_pub(&state_command_chan, &cmd, PUB_TIMEOUT);
     }
   }
 

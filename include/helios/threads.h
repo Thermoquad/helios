@@ -8,7 +8,7 @@ int helios_state_runner(void);
 int glow_controller(void);
 int pump_controller(void);
 int motor_controller(void);
-int temperature_controller(void);
+int thermometer_controller(void);
 
 int serial_rx_thread(void);
 int serial_tx_thread(void);

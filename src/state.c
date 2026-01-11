@@ -694,7 +694,7 @@ static void state_machine_data_callback(const struct zbus_channel* chan)
 
   } else if (&temperature_data_chan == chan) {
     const struct temperature_data_msg* msg = zbus_chan_const_msg(chan);
-    temperature = msg->temperature;
+    temperature = msg->reading;
 
   } else {
     LOG_WRN_RATELIMIT("state machine got unhandled data over zbus channel %s",
@@ -790,4 +790,65 @@ ZBUS_CHAN_DEFINE(state_data_chan, /* Name */
     ZBUS_MSG_INIT(.code = 0, .error = false,
         .state = FUSAIN_STATE_INITIALIZING,
         .timestamp = 0) /* Initial value */
+);
+
+//////////////////////////////////////////////////////////////
+// Configuration Channels
+//////////////////////////////////////////////////////////////
+
+ZBUS_CHAN_DEFINE(telemetry_config_chan, /* Name */
+    struct telemetry_config_msg, /* Message type */
+    NULL, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS_EMPTY, /* Observers */
+    ZBUS_MSG_INIT(.enabled = false, .interval_ms = 100) /* Initial value */
+);
+
+ZBUS_CHAN_DEFINE(timeout_config_chan, /* Name */
+    struct timeout_config_msg, /* Message type */
+    NULL, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS_EMPTY, /* Observers */
+    ZBUS_MSG_INIT(.enabled = true, .timeout_ms = 30000) /* Initial value */
+);
+
+//////////////////////////////////////////////////////////////
+// Data/Request Channels
+//////////////////////////////////////////////////////////////
+
+ZBUS_CHAN_DEFINE(device_announce_chan, /* Name */
+    struct device_announce_msg, /* Message type */
+    NULL, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS_EMPTY, /* Observers */
+    ZBUS_MSG_INIT(.motor_count = 1, .thermometer_count = 1,
+        .pump_count = 1, .glow_count = 1) /* Initial value */
+);
+
+ZBUS_CHAN_DEFINE(send_telemetry_chan, /* Name */
+    struct send_telemetry_msg, /* Message type */
+    NULL, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS_EMPTY, /* Observers */
+    ZBUS_MSG_INIT(.telemetry_type = 0) /* Initial value */
+);
+
+//////////////////////////////////////////////////////////////
+// Error Channels
+//////////////////////////////////////////////////////////////
+
+ZBUS_CHAN_DEFINE(error_invalid_cmd_chan, /* Name */
+    struct error_invalid_cmd_msg, /* Message type */
+    NULL, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS_EMPTY, /* Observers */
+    ZBUS_MSG_INIT(.error_code = 0) /* Initial value */
+);
+
+ZBUS_CHAN_DEFINE(error_state_reject_chan, /* Name */
+    struct error_state_reject_msg, /* Message type */
+    NULL, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS_EMPTY, /* Observers */
+    ZBUS_MSG_INIT(.current_state = 0) /* Initial value */
 );

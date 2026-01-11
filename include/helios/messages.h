@@ -5,6 +5,7 @@
 
 #include <fusain/fusain.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 //////////////////////////////////////////////////////////////
 // State
@@ -12,14 +13,14 @@
 
 struct state_command_msg {
   fusain_mode_t mode;
-  int argument;
+  int32_t argument;
 };
 
 struct state_data_msg {
   bool error;
-  int code;
+  uint8_t code;
   fusain_state_t state;
-  unsigned timestamp;
+  uint32_t timestamp;
 };
 
 //////////////////////////////////////////////////////////////
@@ -27,13 +28,13 @@ struct state_data_msg {
 //////////////////////////////////////////////////////////////
 
 struct glow_command_msg {
-  int glow;
-  int duration;
+  uint8_t glow;
+  int32_t duration;
 };
 
 struct glow_data_msg {
-  int glow;
-  unsigned timestamp;
+  uint8_t glow;
+  uint32_t timestamp;
   bool lit;
 };
 
@@ -42,8 +43,8 @@ struct glow_data_msg {
 //////////////////////////////////////////////////////////////
 
 struct pump_command_msg {
-  int pump;
-  int rate_ms;
+  uint8_t pump;
+  int32_t rate_ms;
 };
 
 enum pump_data_msg_type {
@@ -56,10 +57,10 @@ enum pump_data_msg_type {
 };
 
 struct pump_data_msg {
-  int pump;
-  unsigned timestamp;
+  uint8_t pump;
+  uint32_t timestamp;
   enum pump_data_msg_type type;
-  int rate;
+  int32_t rate;
 };
 
 //////////////////////////////////////////////////////////////
@@ -67,19 +68,19 @@ struct pump_data_msg {
 //////////////////////////////////////////////////////////////
 
 struct motor_command_msg {
-  int motor;
-  int rpm;
+  uint8_t motor;
+  int32_t rpm;
 };
 
 struct motor_data_msg {
-  int motor;
-  unsigned timestamp;
-  int rpm;
-  int target;
-  int max_rpm;
-  int min_rpm;
-  int pwm;
-  int pwm_max;
+  uint8_t motor;
+  uint32_t timestamp;
+  int32_t rpm;
+  int32_t target;
+  int32_t max_rpm;
+  int32_t min_rpm;
+  uint32_t pwm;
+  uint32_t pwm_max;
 };
 
 //////////////////////////////////////////////////////////////
@@ -101,23 +102,108 @@ enum temperature_command_type {
  * Temperature controller command message
  */
 struct temperature_command_msg {
-  int thermometer; // Temperature controller index
+  uint8_t thermometer; // Temperature controller index
   enum temperature_command_type type; // Command type to execute
-  int motor_index; // Motor index (used with WATCH_MOTOR)
-  double target_temperature; // Target temperature (used with SET_TARGET_TEMP)
+  uint8_t motor_index; // Motor index (used with WATCH_MOTOR)
+  float target_temperature; // Target temperature (used with SET_TARGET_TEMP)
 };
 
 /**
  * Temperature data message with PID control status
  */
 struct temperature_data_msg {
-  int thermometer; // Temperature controller index
-  unsigned timestamp; // Reading timestamp in microseconds
-  double temperature; // Current temperature in Celsius
-  bool pid_enabled; // PID controller active
-  bool rpm_control_enabled; // Motor RPM control active
-  int watched_motor; // Motor being monitored (-1 if none)
-  double target_temperature; // Target temperature for PID control
+  uint8_t thermometer; // Temperature controller index
+  uint32_t timestamp; // Reading timestamp in microseconds
+  float reading; // Current temperature in Celsius
+  bool pid_enabled; // PID controller active (internal use, no Fusain equivalent)
+  bool temperature_rpm_control; // Motor RPM control active
+  int32_t watched_motor; // Motor being monitored (-1 if none)
+  float target_temperature; // Target temperature for PID control
+};
+
+//////////////////////////////////////////////////////////////
+// Configuration Commands
+//////////////////////////////////////////////////////////////
+
+struct motor_config_msg {
+  uint8_t motor;
+  bool pwm_period_present;
+  uint32_t pwm_period;
+  bool pid_kp_present;
+  double pid_kp;
+  bool pid_ki_present;
+  double pid_ki;
+  bool pid_kd_present;
+  double pid_kd;
+  bool max_rpm_present;
+  int32_t max_rpm;
+  bool min_rpm_present;
+  int32_t min_rpm;
+  bool min_pwm_duty_present;
+  uint32_t min_pwm_duty;
+};
+
+struct pump_config_msg {
+  uint8_t pump;
+  bool pulse_ms_present;
+  uint32_t pulse_ms;
+  bool recovery_ms_present;
+  uint32_t recovery_ms;
+};
+
+struct temp_config_msg {
+  uint8_t thermometer;
+  bool pid_kp_present;
+  double pid_kp;
+  bool pid_ki_present;
+  double pid_ki;
+  bool pid_kd_present;
+  double pid_kd;
+};
+
+struct glow_config_msg {
+  uint8_t glow;
+  bool max_duration_present;
+  uint32_t max_duration;
+};
+
+struct telemetry_config_msg {
+  bool enabled;
+  uint32_t interval_ms;
+};
+
+struct timeout_config_msg {
+  bool enabled;
+  uint32_t timeout_ms;
+};
+
+//////////////////////////////////////////////////////////////
+// Data Messages
+//////////////////////////////////////////////////////////////
+
+struct device_announce_msg {
+  uint8_t motor_count;
+  uint8_t thermometer_count;
+  uint8_t pump_count;
+  uint8_t glow_count;
+};
+
+struct send_telemetry_msg {
+  uint8_t telemetry_type;
+  bool index_present;
+  uint8_t index;
+};
+
+//////////////////////////////////////////////////////////////
+// Error Messages
+//////////////////////////////////////////////////////////////
+
+struct error_invalid_cmd_msg {
+  int32_t error_code;
+};
+
+struct error_state_reject_msg {
+  uint8_t current_state;
 };
 
 #endif

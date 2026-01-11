@@ -10,6 +10,15 @@ pico_i2c0: &i2c0 {};
 pico_i2c1: &i2c1 {};
 pico_uart1: &uart1 {};
 
+/* Set GP23 high to put RT6150 regulator into low-ripple PWM mode */
+&gpio0 {
+  smps-mode {
+    gpio-hog;
+    gpios = <23 GPIO_ACTIVE_HIGH>;
+    output-high;
+  };
+};
+
 &pinctrl {
   pwm_ch6b_default: pwm_ch6b_default {
     group1 {

@@ -304,6 +304,83 @@ void motor_command_callback(const struct zbus_channel* chan)
 
 ZBUS_LISTENER_DEFINE(motor_command_listener, motor_command_callback);
 
+bool motor_config_validator(const void* msg, size_t msg_size)
+{
+  const struct motor_config_msg* cfg = msg;
+  if (cfg->motor > ARRAY_SIZE(motors) - 1) {
+    LOG_ERR("Invalid motor index: %d", cfg->motor);
+    return false;
+  }
+  return true;
+}
+
+void motor_config_callback(const struct zbus_channel* chan)
+{
+  const struct motor_config_msg* cfg = zbus_chan_const_msg(chan);
+  LOG_DBG("Got config for motor %d", cfg->motor);
+
+  k_mutex_lock(&motor_mutex, MUTEX_WAIT);
+  struct motor_state* motor = &motors[cfg->motor];
+
+  // Apply PWM period if present
+  if (cfg->pwm_period_present && cfg->pwm_period > 0) {
+    motor->pulse_cycle = cfg->pwm_period;
+    motor->pid.output_max_limit = cfg->pwm_period;
+    LOG_INF("Motor %d: PWM period set to %u", cfg->motor, cfg->pwm_period);
+  }
+
+  // Apply min PWM duty if present
+  if (cfg->min_pwm_duty_present) {
+    motor->pulse_min = cfg->min_pwm_duty;
+    motor->pid.output_min_limit = cfg->min_pwm_duty;
+    LOG_INF("Motor %d: min PWM duty set to %u", cfg->motor, cfg->min_pwm_duty);
+  }
+
+  // Apply PID gains if present, reset PID state when gains change
+  bool pid_gains_changed = false;
+  if (cfg->pid_kp_present) {
+    motor->pid.p_gain = cfg->pid_kp;
+    pid_gains_changed = true;
+    LOG_INF("Motor %d: Kp set to %.2f", cfg->motor, cfg->pid_kp);
+  }
+  if (cfg->pid_ki_present) {
+    motor->pid.i_gain = cfg->pid_ki;
+    pid_gains_changed = true;
+    LOG_INF("Motor %d: Ki set to %.2f", cfg->motor, cfg->pid_ki);
+  }
+  if (cfg->pid_kd_present) {
+    motor->pid.d_gain = cfg->pid_kd;
+    pid_gains_changed = true;
+    LOG_INF("Motor %d: Kd set to %.2f", cfg->motor, cfg->pid_kd);
+  }
+  if (pid_gains_changed) {
+    reset_pid(&motor->pid);
+    LOG_INF("Motor %d: PID state reset after gain change", cfg->motor);
+  }
+
+  // Apply RPM limits if present
+  if (cfg->max_rpm_present && cfg->max_rpm > 0) {
+    motor->max_rpm = cfg->max_rpm;
+    LOG_INF("Motor %d: max_rpm set to %d", cfg->motor, cfg->max_rpm);
+  }
+  if (cfg->min_rpm_present && cfg->min_rpm >= 0) {
+    motor->min_rpm = cfg->min_rpm;
+    LOG_INF("Motor %d: min_rpm set to %d", cfg->motor, cfg->min_rpm);
+  }
+
+  k_mutex_unlock(&motor_mutex);
+}
+
+ZBUS_LISTENER_DEFINE(motor_config_listener, motor_config_callback);
+
+ZBUS_CHAN_DEFINE(motor_config_chan, /* Name */
+    struct motor_config_msg, /* Message type */
+    motor_config_validator, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS(motor_config_listener), /* Observers */
+    ZBUS_MSG_INIT(.motor = 0) /* Initial value */
+);
+
 ZBUS_CHAN_DEFINE(motor_command_chan, /* Name */
     struct motor_command_msg, /* Message type */
     motor_command_validator, /* Validator */

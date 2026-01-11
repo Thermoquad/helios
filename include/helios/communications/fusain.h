@@ -1,11 +1,11 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Helios Serial Handler - ICU-specific implementation
+ * Helios Fusain Handler - ICU-specific implementation
  */
 
-#ifndef HELIOS_SERIAL_HANDLER_H
-#define HELIOS_SERIAL_HANDLER_H
+#ifndef HELIOS_FUSAIN_H
+#define HELIOS_FUSAIN_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -39,4 +39,4 @@ void serial_get_timeout_config(bool* enabled, uint32_t* timeout_ms);
  */
 void serial_set_timeout_enabled(bool enabled);
 
-#endif /* HELIOS_SERIAL_HANDLER_H */
+#endif /* HELIOS_FUSAIN_H */

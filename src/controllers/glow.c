@@ -192,6 +192,42 @@ void glow_command_callback(const struct zbus_channel* chan)
 
 ZBUS_LISTENER_DEFINE(glow_command_listener, glow_command_callback);
 
+bool glow_config_validator(const void* msg, size_t msg_size)
+{
+  const struct glow_config_msg* cfg = msg;
+  if (cfg->glow > ARRAY_SIZE(glows) - 1) {
+    LOG_ERR("Invalid glow index: %d", cfg->glow);
+    return false;
+  }
+  return true;
+}
+
+void glow_config_callback(const struct zbus_channel* chan)
+{
+  const struct glow_config_msg* cfg = zbus_chan_const_msg(chan);
+  LOG_DBG("Got config for glow %d", cfg->glow);
+
+  k_mutex_lock(&glow_mutex, MUTEX_WAIT);
+  struct glow_state* glow = &glows[cfg->glow];
+
+  if (cfg->max_duration_present && cfg->max_duration > 0) {
+    glow->max_duration = cfg->max_duration;
+    LOG_INF("Glow %d: max_duration set to %u ms", cfg->glow, cfg->max_duration);
+  }
+
+  k_mutex_unlock(&glow_mutex);
+}
+
+ZBUS_LISTENER_DEFINE(glow_config_listener, glow_config_callback);
+
+ZBUS_CHAN_DEFINE(glow_config_chan, /* Name */
+    struct glow_config_msg, /* Message type */
+    glow_config_validator, /* Validator */
+    NULL, /* User Data */
+    ZBUS_OBSERVERS(glow_config_listener), /* Observers */
+    ZBUS_MSG_INIT(.glow = 0) /* Initial value */
+);
+
 ZBUS_CHAN_DEFINE(glow_command_chan, /* Name */
     struct glow_command_msg, /* Message type */
     glow_command_validator, /* Validator */
