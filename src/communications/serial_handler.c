@@ -13,8 +13,8 @@
 #include <zephyr/logging/log.h>
 
 #include <fusain/fusain.h>
-#include <fusain_cbor_decode.h>
-#include <fusain_cbor_types.h>
+#include <fusain/generated/cbor_decode.h>
+#include <fusain/generated/cbor_types.h>
 #include <helios/communications/serial_handler.h>
 #include <helios/zbus.h>
 
