@@ -15,6 +15,8 @@
 
 **Operating Temperature:** 220-230°C (normal), 275°C (emergency stop), 300°C (hardware damage threshold)
 
+**License:** GPL-2.0-or-later (GNU General Public License v2.0 or later)
+
 ---
 
 ## Architecture
